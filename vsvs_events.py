@@ -11,25 +11,37 @@ class GeneralEvents(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        
-    
 
     @commands.Cog.listener()
     async def on_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ):
+        msg = ''
         if hasattr(ctx.command, 'on_error'):
             return
+        if not isinstance(
+            error, (commands.CommandOnCooldown, commands.CommandNotFound)
+        ):
+            self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
+
         if isinstance(error, commands.NotOwner):
             msg = 'command for bot owner only.'
-        if isinstance(error, commands.CommandNotFound):
+        elif isinstance(error, commands.CommandNotFound):
             if ctx.message.content.count('`') > 1:
                 return
             msg = 'command not found. try doing `help for a list of all commands'
         else:
             msg = ''
             await ctx.send(error)
-        traceback.print_tb(error.__traceback__, None, sys.stdout)
+        now = datetime.now().strftime("%m/%d, %H:%M:%S")
+        with open(vsvs_config.errfile, 'a') as errfile:
+            errfile.write(
+                f'==================== {now} ====================\n'
+                f'{ctx.guild.name} ({ctx.channel.name}) - {ctx.author}: {ctx.message.content}\n'
+            )
+            traceback.print_tb(error.__traceback__, None, errfile)
+            errfile.write('--------------------\n\n')
+        print(f"ERROR {now} -", error)
         if msg:
             await ctx.send(msg)
 
@@ -69,10 +81,9 @@ class MessageDeleteEvent(commands.Cog):
         ban_members=True,  # OR, not AND
         kick_members=True,
         manage_messages=True,
-        mention_everyone=True,
     )
     async def deldmsgs(self, ctx: commands.Context, *, which: str = ''):
-        """view stored deleted messages"""
+        """snipe deleted messages. usage: `snipe [member | "all"]"""
         if not self.deleted_msgs:
             await ctx.send('no deleted messages since start-time')
             return
@@ -137,3 +148,4 @@ class MessageDeleteEvent(commands.Cog):
 def setup(bot: commands.Bot):
     bot.add_cog(GeneralEvents(bot))
     bot.add_cog(MessageDeleteEvent(bot))
+    print('LOADED events')
