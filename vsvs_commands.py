@@ -14,6 +14,7 @@ class OwnerCommands(commands.Cog):
     @commands.command(name='exit', aliases=['ex'])
     @commands.is_owner()
     async def exit(self, ctx: commands.Context):
+        """close the event loop"""
         await ctx.send('are you sure you want to exit?')
 
         def chk(e):
@@ -38,8 +39,9 @@ class OwnerCommands(commands.Cog):
             await ctx.send(error)
 
     @commands.command(name='setstatus')
-    @commands.is_owner()
+    @commands.cooldown(rate=1, per=30, type=commands.BucketType.default)
     async def setstatus(self, ctx: commands.Context, new: str):
+        """set the status of the bot. usage: `setstatus {online, idle, dnd, offline}"""
         act_rn = ctx.me.activity
         match new.strip().lower():
             case 'online':
@@ -51,16 +53,19 @@ class OwnerCommands(commands.Cog):
             case 'idle':
                 sts = discord.Status.idle
             case _:
-                await ctx.send('invalid status')
-                return
+                raise commands.BadArgument(
+                    message='invalid status. must be of types '
+                    '{online, idle, dnd, offline}. for activities do \`setactivity'
+                )
         await self.bot.change_presence(activity=act_rn, status=sts)
         await ctx.send(f'set status to {sts}')
 
     @commands.command(name='setactivity')
-    @commands.is_owner()
+    @commands.cooldown(rate=1, per=30, type=commands.BucketType.default)
     async def setactivity(
         self, ctx: commands.Context, type: str, *, act: str = 'something'
     ):
+        """set the activity of the bot. usage: `setactivity {playing, streaming, watching, listening, competing} {...}"""
         sts_rn = ctx.me.status
         match type := type.lower():
             case 'playing':
@@ -83,8 +88,10 @@ class OwnerCommands(commands.Cog):
                 await ctx.send(f'cleared activity')
                 return
             case _:
-                await ctx.send('invalid activity')
-                return
+                raise commands.BadArgument(
+                    message='invalid activity. must be of types '
+                    '{playing, streaming, watching, listening, competing}{...}'
+                )
         await self.bot.change_presence(activity=new_act, status=sts_rn)
         await ctx.send(
             f'set activity to \"{type} '
@@ -101,9 +108,26 @@ class GeneralCommands(commands.Cog):
         self.start_time = datetime.now().strftime('%m/%d, %H:%M:%S')
 
     @commands.command(name='help')
-    @commands.cooldown(rate=1, per=30, type=commands.BucketType.channel)
-    async def help(self, ctx: commands.Context):
-        """display docs"""
+    async def help(self, ctx: commands.Context, command: str = None):
+        """display help for commands. usage: `help [command]"""
+        ebd = None
+        if not command:
+            ebd = await self.default_help()
+        else:
+            cmd = self.bot.all_commands.get(command)
+            if cmd is None:
+                raise commands.CommandNotFound(
+                    f'command "{command}" not found. '
+                    'try doing \`help for a list of all commands'
+                )
+            ebd = discord.Embed(
+                title=f'{cmd.name}',
+                description=f'{cmd.short_doc}',
+                colour=discord.Colour.dark_orange(),
+            )
+        await ctx.send(embed=ebd)
+
+    async def default_help(self) -> discord.Embed:
         embed_msg = discord.Embed(
             title='Vesuvius#8475',
             description='small bot that will have more stuff added gradually',
@@ -116,20 +140,23 @@ class GeneralCommands(commands.Cog):
                 'setactivity',
                 'help',
                 'starttime',
-                'ey',
                 'ping',
                 'snipe',
+                'source',
             ]
         )
         cmds2 = '\n'.join(
             [
                 '**math:**',
+                '\`modulo',
+                '\`divmod',
                 '\`trianglecenters',
                 '\`transformations\n',
                 '**games:**',
                 '\`tictactoe',
                 '\`connectfour',
                 '\`reversi',
+                '\`weiqi',
             ]
         )
         embed_msg.add_field(name='commands:', value=cmds)
@@ -139,24 +166,29 @@ class GeneralCommands(commands.Cog):
             value='report all bugs (there are a lot of them)\nto @zhona#2155 with a ping',
             inline=False,
         )
-        await ctx.send(embed=embed_msg)
+        return embed_msg
+
+    @commands.command(name='source', aliases=['src'])
+    @commands.cooldown(rate=1, per=240, type=commands.BucketType.channel)
+    async def source(self, ctx: commands.Context):
+        """link to source code repository. usage: `source"""
+        ebd = discord.Embed(
+            title='Source Code',
+            description='embarassing...\ngithub.com/lonaslee/Vesuvius',
+            colour=discord.Colour.dark_blue(),
+        )
+        await ctx.send(embed=ebd)
 
     @commands.command(name='starttime')
     @commands.cooldown(rate=1, per=180, type=commands.BucketType.channel)
     async def starttime(self, ctx: commands.Context):
-        """get the start time of the current instance of the bot"""
+        """get the start time of the current instance of the bot. usage: `starttime"""
         await ctx.send(f'bot started at {self.start_time}')
-
-    @commands.command(name='ey')
-    @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
-    async def ey(self, ctx: commands.Context):
-        """reply with 'Oi'"""
-        await ctx.send('Oi')
 
     @commands.command(name='ping')
     @commands.cooldown(rate=1, per=30, type=commands.BucketType.channel)
     async def ping(self, ctx: commands.Context):
-        """test bot ping and API"""
+        """test bot ping and API. usage: `ping"""
         ping = round(self.bot.latency * 1000)
         if ping > 149:
             msg = f'Ouch!  {ping}ms!'
@@ -170,7 +202,18 @@ class GeneralCommands(commands.Cog):
         diff = end - start
         await ctx.send(f'API:     {round(diff * 1000)}ms.')
 
+    @commands.command(name='c4')
+    @commands.cooldown(rate=1, per=60)
+    async def c4(self, ctx: commands.Context, *, fillers=None):
+        """suprise for people who use `c4 as a shorthand for `connectfour"""
+        await ctx.message.reply('bomb has been planted!')
+        for n in reversed(range(1, 6)):
+            await ctx.send(f'{n}...')
+            await asyncio.sleep(1)
+        await ctx.message.reply('BOOM! :boom:')
+
 
 def setup(bot: commands.Bot):
     bot.add_cog(OwnerCommands(bot))
     bot.add_cog(GeneralCommands(bot))
+    print('LOADED commands')
