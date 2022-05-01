@@ -1,26 +1,17 @@
 from __future__ import annotations
 import discord
 import asyncio
+import datetime
 import re
-from features import (
-    trianglecenters,
-    transformations,
-    tictactoe,
-    connectfour,
-    reversi,
-    weiqi,
-)
-from random import randint
-from datetime import datetime
-from time import time
-from concurrent.futures import ThreadPoolExecutor
+import vsvs_config
+from features import trianglecenters, transformations, wotd
 from matplotlib import pyplot as plt
 from itertools import combinations, chain
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 
 class GraphFeatures(commands.Cog):
-    """features cog that has the commands to invoke special features"""
+    """features cog that has the commands to invoke special features that use a graph"""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -28,7 +19,7 @@ class GraphFeatures(commands.Cog):
     @commands.command(name='trianglecenters')
     @commands.cooldown(rate=1, per=60, type=commands.BucketType(1))
     async def trianglecenters(self, ctx: commands.Context, *, text: str = None):
-        """calculate orthocenter, circumcenter, and centroid from three coordinate points of a triangle. usage: `trianglecenters {x, y, x2, y2, x3, y3}"""
+        """calculate orthocenter, circumcenter, and centroid from three coordinate points of a triangle. usage: `trianglecenters [x, y, x2, y2, x3, y3]"""
         a, b, c = {}, {}, {}
         nstr = False
         if text:
@@ -52,7 +43,9 @@ class GraphFeatures(commands.Cog):
             except ValueError:  # get_point timed out and returned None
                 return
         try:
-            fs, fsnw, mpa = await self.executor(lambda: trianglecenters.main(a, b, c))
+            fs, fsnw, mpa = await self.bot.run_in_tpexec(
+                lambda: trianglecenters.main(a, b, c)
+            )
         except ValueError:
             ctx.send(
                 f'not a triangle. if there is nothing wrong with your input, '
@@ -67,7 +60,7 @@ class GraphFeatures(commands.Cog):
             title='Triangle Centers',
             description=f'```py\n{fsnw if nstr else fs}```',
             color=discord.Colour.dark_green(),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.datetime.utcnow(),
         )
         embed_msg.set_image(url=f'attachment://{fobj.filename}')
         await ctx.send(file=fobj, embed=embed_msg)
@@ -146,7 +139,7 @@ class GraphFeatures(commands.Cog):
                 linewidth=2.0,
                 color='black',
             )
-        tme = datetime.now().strftime('%H%M%S')
+        tme = datetime.datetime.now().strftime('%H%M%S')
         plt.savefig(
             fl := f'vsvs_files/trianglecenters/{tme}--{str(caller).replace("#", "")}--plot.png'
         )
@@ -176,7 +169,7 @@ class GraphFeatures(commands.Cog):
                 if tup is None:
                     return  # get_point timed out and returned None
                 pt_lst.append((tup[0], tup[1]))
-        aps = await self.executor(lambda: transformations.AllPoints(pt_lst))
+        aps = await self.bot.run_in_tpexec(lambda: transformations.AllPoints(pt_lst))
         ap_str = '\n'.join([str(p) for p in aps.allpoints])
         for n in range(100):
             res = await self.get_inp(ctx)
@@ -184,13 +177,13 @@ class GraphFeatures(commands.Cog):
                 return
             if res != 'end':
                 m, a = res
-                await self.executor(lambda: getattr(aps, m)(a))
+                await self.bot.run_in_tpexec(lambda: getattr(aps, m)(a))
             ap_str = '\n'.join([str(p) for p in aps.allpoints])
             embed_msg = discord.Embed(
                 title='Transformations',
                 description=ap_str,
                 colour=discord.Colour.dark_blue(),
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.datetime.utcnow(),
             )
             path = await self.graph_fig(aps, ctx.message.author)
             fobj = discord.File(
@@ -211,7 +204,7 @@ class GraphFeatures(commands.Cog):
             msg = await self.bot.wait_for(event='message', check=chki, timeout=30)
             if msg.content == 'end':
                 return 'end'
-            ap_mtd, ap_args = await self.executor(
+            ap_mtd, ap_args = await self.bot.run_in_tpexec(
                 lambda: transformations.Inputs().main(msg.content)
             )
         except asyncio.TimeoutError:
@@ -254,620 +247,12 @@ class GraphFeatures(commands.Cog):
             plt.plot(
                 [cmb[0].x, cmb[1].x], [cmb[0].y, cmb[1].y], linewidth=2.0, color='black'
             )
-        tme = datetime.now().strftime('%H%M%S')
+        tme = datetime.datetime.now().strftime('%H%M%S')
         plt.savefig(
             fl := f'vsvs_files/transformations/{tme}--{str(caller).replace("#", "")}--plot.png'
         )
         plt.clf()
         return fl
-
-    @staticmethod
-    async def executor(func):
-        res = await asyncio.get_event_loop().run_in_executor(
-            ThreadPoolExecutor(1), func
-        )
-        return res
-
-
-# =============================================================================
-
-
-class GameFeatures(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
-        self.ingame = []
-
-    @commands.command(name='ingames')
-    @commands.cooldown(rate=1, per=300, type=commands.BucketType(2))
-    async def ingames(self, ctx: commands.Context, clear: bool = False):
-        await ctx.send(str(self.ingame))
-        if clear:
-            self.ingame = []
-            await ctx.send('cleared!')
-
-    @commands.command(name='tictactoe', aliases=['ttt'])
-    async def tictactoe(self, ctx: commands.Context, opponent: discord.guild.Member):
-        """play tic-tac-toe with another user. usage: `tictactoe {member}"""
-        if await self.wait_confirm(ctx, opponent, 'tic-tac-toe'):
-            plyr_x: discord.Member
-            plyr_o: discord.Member
-            if randint(0, 1):
-                plyr_x, plyr_o = ctx.message.author, opponent
-            else:
-                plyr_x, plyr_o = opponent, ctx.message.author
-            await ctx.send(f'X: {plyr_x.display_name}, O: {plyr_o.display_name}')
-            bd = tictactoe.Board()
-            msg_bd = await ctx.send(str(bd))
-            prompt = await ctx.send(f"{plyr_x.mention} X's turn! (send coordinates)")
-            for n in range(1, 10):
-                if n % 2 == 0:
-                    turn = plyr_o
-                    await prompt.edit(
-                        content=f"{plyr_o.mention} O's turn! (send coordinates)"
-                    )
-                else:
-                    turn = plyr_x
-                    await prompt.edit(
-                        content=f"{plyr_x.mention} X's turn! (send coordinates)"
-                    )
-                try:
-                    x, y = await self.ttt_move(ctx, plyr_o, plyr_x, turn)
-                except TypeError:
-                    await self.done_playing(plyr_x, plyr_o)
-                    return
-                while w := await bd.assign_square(x, y):
-                    if w in {'X', 'O'}:
-                        await msg_bd.edit(content=str(bd))
-                        await prompt.edit(
-                            content=f'winner is {w}, '
-                            f'{plyr_x.display_name if w == "X" else plyr_o.display_name}!'
-                        )
-                        await self.done_playing(plyr_x, plyr_o)
-                        return
-                    if w == 'occupied':
-                        errm = await ctx.send(
-                            f'{turn.display_name}: {x, y} is already occupied, '
-                            'are you blind? try another spot.'
-                        )
-                        x, y = await self.ttt_move(ctx, plyr_o, plyr_x, turn)
-                        await errm.delete()
-                    else:
-                        break
-                await msg_bd.edit(content=str(bd))
-            await prompt.edit(content=f'draw!')
-        else:
-            await self.done_playing(plyr_x, plyr_o)
-            return
-
-    async def ttt_move(
-        self,
-        ctx: commands.Context,
-        po: discord.Member,
-        px: discord.Member,
-        pr: discord.Member,
-    ):
-        def chkt(m):
-            return m.author == pr and m.channel == ctx.channel
-
-        try:
-            cds = await self.bot.wait_for('message', check=chkt, timeout=30)
-        except asyncio.TimeoutError:
-            faster = await ctx.send(
-                f'{pr.mention} hurry up! it takes you more than '
-                '30 seconds to make a move in tic-tac-toe?'
-            )
-            try:
-                cds = await self.bot.wait_for('message', check=chkt, timeout=30)
-                await faster.delete()
-            except asyncio.TimeoutError:
-                await ctx.send(
-                    f'game ended. {px.display_name if pr is po else po.display_name} '
-                    f'is winner, because {pr.display_name} took over a 60 '
-                    'seconds to make a move in fricking tic-tac-toe.'
-                )
-                return
-        try:
-            x, y = re.search(r'(?P<x>\d)[(), ]*(?P<y>\d)', cds.content).groups()
-        except AttributeError:
-            errm = await ctx.send(f'must have x and y positions. try again')
-            await cds.delete()
-            x, y = await self.ttt_move(ctx, po, px, pr)
-            await errm.delete()
-            return x, y
-        if not x or not y:
-            errm = await ctx.send(f'incorrect formatting: {cds.content}. try again')
-            await cds.delete()
-            x, y = await self.ttt_move(ctx, po, px, pr)
-            await errm.delete()
-            return x, y
-        if x not in {'1', '2', '3'} or y not in {'1', '2', '3'}:
-            errm = await ctx.send(f'off board range: {x, y}. try again')
-            await cds.delete()
-            x, y = await self.ttt_move(ctx, po, px, pr)
-            await errm.delete()
-            return x, y
-        await cds.delete()
-        return x, y
-
-    # =========================================================================
-
-    @commands.command(name='connectfour', aliases=['connect4', 'cf'])
-    async def connectfour(self, ctx: commands.Context, opponent: discord.guild.Member):
-        """play connect-four with another user. usage: `connect4 {member}"""
-        if await self.wait_confirm(ctx, opponent, 'connect-four'):
-            plyr_r: discord.Member
-            plyr_y: discord.Member
-            if randint(0, 1):
-                plyr_r, plyr_y = ctx.message.author, opponent
-            else:
-                plyr_r, plyr_y = opponent, ctx.message.author
-            await ctx.send(
-                f'```ansi\n\u001b[0m\u001b[1;33mYellow: {plyr_y.display_name}, \u001b[1;31mRed: {plyr_r.display_name}```'
-            )
-            bd = connectfour.C4Board()
-            sbd = await bd.as_string()
-            msg_bd1 = await ctx.send(sbd[0])
-            msg_bd2 = await ctx.send(sbd[1])
-            num17 = (
-                '1\N{variation selector-16}\N{combining enclosing keycap}',
-                '2\N{variation selector-16}\N{combining enclosing keycap}',
-                '3\N{variation selector-16}\N{combining enclosing keycap}',
-                '4\N{variation selector-16}\N{combining enclosing keycap}',
-                '5\N{variation selector-16}\N{combining enclosing keycap}',
-                '6\N{variation selector-16}\N{combining enclosing keycap}',
-                '7\N{variation selector-16}\N{combining enclosing keycap}',
-            )
-            for rtion in num17:
-                await msg_bd2.add_reaction(rtion)
-            prompt = await ctx.send(
-                f"{plyr_y.mention} Yellow's turn! (react under column)"
-            )
-            for n in range(1, 43):
-                if n % 2 == 0:
-                    turn = plyr_r
-                    await prompt.edit(
-                        content=f"{plyr_r.mention} Red's Turn! (react under column)"
-                    )
-                else:
-                    turn = plyr_y
-                    await prompt.edit(
-                        content=f"{plyr_y.mention} Yellow's Turn! (react under column)"
-                    )
-                row = await self.c4_move(ctx, plyr_r, plyr_y, turn)
-                if row is None:
-                    await self.done_playing(plyr_r, plyr_y)
-                    return
-                while res := await bd.drop_square(row):
-                    if res == 'column full':
-                        errm = await ctx.send(
-                            f'{turn.display_name}: row {row} is already full, '
-                            'are you blind? try another row.'
-                        )
-                        row = await self.c4_move(ctx, plyr_r, plyr_y, turn)
-                        await errm.delete()
-                        sbd = await bd.as_string()
-                        await msg_bd1.edit(content=sbd[0])
-                        await msg_bd2.edit(content=sbd[1])
-                        continue
-                    if res in {'YW', 'RW'}:
-                        sbd = await bd.as_string()
-                        await msg_bd1.edit(content=sbd[0])
-                        await msg_bd2.edit(content=sbd[1])
-                        await prompt.edit(
-                            content=f'''```ansi\n\u001b[0m\u001b[1;{33 if res == "YW" else 31}mwinner is {"Yellow" if res == "YW" else "Red"}, {plyr_y.display_name if res == "YW" else plyr_r.display_name}!```'''
-                        )
-                        await self.done_playing(plyr_r, plyr_y)
-                        return
-                    else:
-                        sbd = await bd.as_string()
-                        await msg_bd1.edit(content=sbd[0])
-                        await msg_bd2.edit(content=sbd[1])
-                        break
-            await prompt.edit(content='draw!')
-        else:
-            await self.done_playing(plyr_r, plyr_y)
-            return
-
-    async def c4_move(
-        self,
-        ctx: commands.Context,
-        pr: discord.Member,
-        py: discord.Member,
-        prn: discord.Member,
-    ):
-        num17 = (
-            '1\N{variation selector-16}\N{combining enclosing keycap}',
-            '2\N{variation selector-16}\N{combining enclosing keycap}',
-            '3\N{variation selector-16}\N{combining enclosing keycap}',
-            '4\N{variation selector-16}\N{combining enclosing keycap}',
-            '5\N{variation selector-16}\N{combining enclosing keycap}',
-            '6\N{variation selector-16}\N{combining enclosing keycap}',
-            '7\N{variation selector-16}\N{combining enclosing keycap}',
-        )
-
-        def chkf(r, u):
-            return u == prn and str(r.emoji) in num17
-
-        try:
-            reaction, user = await self.bot.wait_for(
-                'reaction_add', check=chkf, timeout=30
-            )
-        except asyncio.TimeoutError:
-            faster = await ctx.send(
-                f'{prn.mention} hurry up! it takes you more than '
-                '30 seconds to make a move in connect-four?'
-            )
-            try:
-                reaction, user = await self.bot.wait_for(
-                    'reaction_add', check=chkf, timeout=30
-                )
-                await faster.delete()
-            except asyncio.TimeoutError:
-                await ctx.send(
-                    f'game ended. {py if pr is prn else pr} is winner, because '
-                    f'{pr.display_name} took over 60 seconds to make '
-                    'a move in fricking connect-four.'
-                )
-                return
-        num = str(reaction.emoji)[0]
-        await reaction.remove(user)
-        return num
-
-    @commands.command(name='reversi', aliases=['othello', 'oto'])
-    async def reversi(
-        self, ctx: commands.Context, opponent: discord.guild.Member, length: int = 10
-    ):
-        """play reversi with another user. usage: `reversi {member}"""
-        if await self.wait_confirm(
-            ctx,
-            opponent,
-            ctx.invoked_with
-            if ctx.invoked_with in {'reversi', 'othello'}
-            else 'Othello',
-        ):
-            if length not in range(91):
-                length = 15
-            endtime = time() + length * 60
-            black: discord.Member
-            white: discord.Member
-            if randint(0, 1):
-                black, white = ctx.message.author, opponent
-            else:
-                black, white = opponent, ctx.message.author
-            await ctx.send(
-                f'```ansi\n\u001b[0m\u001b[1;32mTime limit: {length} minutes!\n\u001b[1;45;1;30mBlack: {black.display_name}, \u001b[1;45;1;37mWhite: {white.display_name}```'
-            )
-            bd = reversi.Board()
-            sbd = await bd.as_string()
-            msg_bd1 = await ctx.send(sbd[0])
-            msg_bd2 = await ctx.send(sbd[1])
-            msg_bd3 = await ctx.send(sbd[2])
-            prompt = await ctx.send(f"{black.mention} Black's turn! (send coordinates)")
-            last = white
-            for n in range(64):
-                if time() >= endtime:
-                    winner = await bd.count_all()
-                    if winner[0] != 'Draw':
-                        await prompt.edit(
-                            content=f"```ansi\n\u001b[1;45;1;{30 if winner[0] == 'Black' else 37}m"
-                            f"Time's up! winner is {winner[0]}, "
-                            f'{black.display_name if winner[0] == "Black" else white.display_name} '
-                            f'with {winner[1]} circles!```'
-                        )
-                        await self.done_playing(black, white)
-                        return
-                    await prompt.edit(content=f'Draw! - {winner[1]}')
-                    await self.done_playing(black, white)
-                    return
-                if not await bd.possible('B'):
-                    await prompt.edit(content=f'winner is White, {white.display_name}!')
-                    await self.done_playing(black, white)
-                    return
-                if not await bd.possible('W'):
-                    await prompt.edit(content=f'winner is Black, {black.display_name}!')
-                    await self.done_playing(black, white)
-                    return
-                if last is black:
-                    turn = last = white
-                    await prompt.edit(
-                        content=f"{white.mention} White's turn! (send coordinates)"
-                    )
-                else:
-                    turn = last = black
-                    await prompt.edit(
-                        content=f"{black.mention} Black's turn! (send coordinates)"
-                    )
-                res = await self.rvsi_move(ctx, black, white, turn, prompt)
-                if not res:
-                    await self.done_playing(black, white)
-                    return
-                while not await bd.assign_square(
-                    res[0], res[1], 'B' if turn is black else 'W'
-                ):
-                    errm = await ctx.send('not a valid spot. try again')
-                    res = await self.rvsi_move(ctx, black, white, turn, prompt)
-                    await errm.delete()
-                sbd1, sbd2, sbd3 = await bd.as_string()
-                await msg_bd1.edit(content=sbd1)
-                await msg_bd2.edit(content=sbd2)
-                await msg_bd3.edit(content=sbd3)
-            winner = await bd.count_all()
-            if winner[0] != 'D':
-                await prompt.edit(
-                    content=f'```ansi\n\u001b[1;45;1;{30 if winner[0] == "Black" else 37}'
-                    f'mwinner is {winner[0]}, '
-                    f'{black.display_name if winner[0] == "Black" else white.display_name} '
-                    f'with {winner[1]} circles!```'
-                )
-            else:
-                await prompt.edit(content=f'Draw! - {winner[1]}')
-                await self.done_playing(black, white)
-                return
-
-    async def rvsi_move(
-        self,
-        ctx: commands.Context,
-        b: discord.Member,
-        w: discord.Member,
-        pr: discord.Member,
-        ppt: discord.Message,
-    ) -> tuple:
-        def chkr(m):
-            return m.author == pr and m.channel == ctx.channel
-
-        try:
-            msg = await self.bot.wait_for('message', check=chkr, timeout=60)
-        except asyncio.TimeoutError:
-            await ppt.edit(content=f'{pr.mention} hurry up!')
-            try:
-                msg = await self.bot.wait_for('message', check=chkr, timeout=60)
-            except asyncio.TimeoutError:
-                await ppt.edit(
-                    content=f'game ended. {b.display_name if pr is w else w.display_name} '
-                    f'is winner, because {pr.display_name} took too long to make a move!'
-                )
-                return ()
-            return x, y
-        try:
-            x, y = re.search(r'(?P<x>\d)[(), ]*(?P<y>\d)', msg.content).groups()
-        except AttributeError:
-            await msg.delete()
-            fmterr = await ctx.send('must have x and y positions. try again')
-            x, y = await self.rvsi_move(ctx, b, w, pr, ppt)
-            await fmterr.delete()
-            return x, y
-        if not x or not y:
-            await msg.delete()
-            fmterr = await ctx.send('must have x and y positions. try again')
-            x, y = await self.rvsi_move(ctx, b, w, pr, ppt)
-            await fmterr.delete()
-            return x, y
-        if int(x) not in (st := set(range(1, 9))) or int(y) not in st:
-            await msg.delete()
-            rgerr = await ctx.send('off board range. try again')
-            x, y = await self.rvsi_move(ctx, b, w, pr, ppt)
-            await rgerr.delete()
-            return x, y
-        await msg.delete()
-        return x, y
-
-    @commands.command(name='go', aliases=['weiqi'])
-    async def weiqi(
-        self,
-        ctx: commands.Context,
-        opponent: discord.guild.Member,
-        length: int = 30,
-        size: int = 19,
-    ):
-        """play weiqi with another user. usage: `weiqi {member}"""
-        if await self.wait_confirm(ctx, opponent, ctx.invoked_with):
-            if length not in range(3, 91):
-                length = 20
-            endtime = time() + length * 60
-            if size not in range(10, 21):
-                size = 19
-            black: discord.Member
-            white: discord.Member
-            if randint(0, 1):
-                black, white = ctx.message.author, opponent
-            else:
-                black, white = opponent, ctx.message.author
-            bd = weiqi.Board(size)
-            bd_ebd = discord.Embed(description=await bd.as_string())
-            msg_with_ebd = await ctx.send(
-                f'```ansi\n\u001b[0m\u001b[1;33mTime limit: {length} minutes!\n\u001b[1;45;1;30mBlack: {black.display_name}, \u001b[1;45;1;37mWhite: {white.display_name}```',
-                embed=bd_ebd,
-            )
-            prompt = await ctx.send(f"{black.mention} Black's turn! (send coordinates)")
-            turn = white
-            for n in range(600):
-                if time() >= endtime:
-                    winner, ratio = await bd.all_counts()
-                    if winner != 'Draw':
-                        await prompt.edit(
-                            content=f"```ansi\n\u001b[1;45;1;{30 if winner == 'Black' else 37}m"
-                            f"Time's up! winner is {winner}, "
-                            f'{black.display_name if winner == "Black" else white.display_name} '
-                            f'with {ratio} stones!```'
-                        )
-                    else:
-                        await prompt.edit(content=f'Draw! - {ratio}')
-                    await self.done_playing(black, white)
-                    return
-                if turn is black:
-                    turn = white
-                    await prompt.edit(
-                        content=f"{white.mention} White's turn! (send coordinates)"
-                    )
-                else:
-                    turn = black
-                    await prompt.edit(
-                        content=f"{black.mention} Black's turn! (send coordinates)"
-                    )
-                res = await self.wq_move(ctx, black, white, turn, prompt)
-                if not res:
-                    await self.done_playing(black, white)
-                    return
-                if res == (None,):
-                    winner, ratio = await bd.all_counts()
-                    if winner != 'Draw':
-                        await prompt.edit(
-                            content=f"```ansi\n\u001b[1;45;1;{30 if winner == 'Black' else 37}m"
-                            f"Game ended! winner is {winner}, "
-                            f'{black.display_name if winner == "Black" else white.display_name} '
-                            f'with {ratio} stones!```'
-                        )
-                    else:
-                        await prompt.edit(content=f'Draw! - {ratio}')
-                    await self.done_playing(black, white)
-                    return
-                while not await bd.assign(
-                    res[0], res[1], 'B' if turn is black else 'W'
-                ):
-                    errm = await ctx.send('not a valid spot! try again')
-                    res = await self.wq_move(ctx, black, white, prompt)
-                    await errm.delete()
-                bd_ebd = discord.Embed(description=await bd.as_string())
-                await msg_with_ebd.edit(embed=bd_ebd)
-            winner, ratio = await bd.all_counts()
-            if winner != 'Draw':
-                await prompt.edit(
-                    content=f"```ansi\n\u001b[1;45;1;{30 if winner == 'Black' else 37}m"
-                    f"Game ended! winner is {winner}, "
-                    f'{black.display_name if winner == "Black" else white.display_name} '
-                    f'with {ratio} stones!```'
-                )
-            else:
-                await prompt.edit(content=f'Draw! - {ratio}')
-            await self.done_playing(black, white)
-            return
-
-    async def wq_move(
-        self,
-        ctx: commands.Context,
-        b: discord.Member,
-        w: discord.Member,
-        pr: discord.Member,
-        ppt: discord.Message,
-    ) -> tuple:
-        def chkr(m):
-            return m.author == pr and m.channel == ctx.channel
-
-        def chkr2(m):
-            return m.author == (b if pr is w else w) and m.channel == ctx.channel
-
-        try:
-            msg = await self.bot.wait_for('message', check=chkr, timeout=80)
-        except asyncio.TimeoutError:
-            await ppt.edit(content=f'{pr.mention} hurry up!')
-            try:
-                msg = await self.bot.wait_for('message', check=chkr, timeout=120)
-            except asyncio.TimeoutError:
-                await ppt.edit(
-                    content=f'game ended. {b.display_name if pr is w else w.display_name} '
-                    f'is winner, because {pr.display_name} took too long to make a move!'
-                )
-                return ()
-            return x, y
-        if msg.content.lower() == 'end':
-            await ppt.edit(
-                content=f'{b.mention if pr is w else w.mention} {pr.display_name} '
-                'wants to end the game now! if you agree, respond with yes.'
-            )
-            try:
-                resp = await self.bot.wait_for('message', check=chkr2, timeout=80)
-                if resp.content.lower() in {'end', 'yes', 'y', 'ok', 'ye'}:
-                    await resp.delete()
-                    await msg.delete()
-                    return (None,)
-            except asyncio.TimeoutError:
-                pass
-            await msg.delete()
-            await ppt.edit(
-                content=f'{pr.mention} your opponent has decided to continue! '
-                '(now send coordinates)'
-            )
-            return await self.wq_move(ctx, b, w, pr, ppt)
-        try:
-            x, y = re.search(r'(?P<x>\d\d?)[(), ]*(?P<y>\d\d?)', msg.content).groups()
-        except AttributeError:
-            await msg.delete()
-            fmterr = await ctx.send('must have x and y positions. try again')
-            x, y = await self.wq_move(ctx, b, w, pr, ppt)
-            await fmterr.delete()
-            return x, y
-        if not x or not y:
-            await msg.delete()
-            fmterr = await ctx.send('must have x and y positions. try again')
-            x, y = await self.wq_move(ctx, b, w, pr, ppt)
-            await fmterr.delete()
-            return x, y
-        if int(x) not in (st := set(range(1, 20))) or int(y) not in st:
-            await msg.delete()
-            rgerr = await ctx.send('off board range. try again')
-            x, y = await self.wq_move(ctx, b, w, pr, ppt)
-            await rgerr.delete()
-            return x, y
-        await msg.delete()
-        return x, y
-
-    async def wait_confirm(
-        self, octx: commands.Context, opp: discord.guild.Member, game: str
-    ) -> int:
-        """wait for confirmation that the opp wants to play game"""
-        if octx.author in self.ingame:
-            await octx.send('you are already in another game.')
-            return 0
-        if opp in self.ingame:
-            await octx.send(
-                f'{opp.display_name} is already in another game. '
-                'wait for it to finish or try another person!'
-            )
-            return
-        if opp == octx.author:
-            await octx.send('you cannot challenge yourself.')
-            return 0
-        if opp == self.bot.user:
-            await octx.send('no.')
-            return 0
-        self.ingame.append(octx.author)
-        inv = await octx.send(
-            f'{octx.message.author.display_name} has challenged {opp.display_name} '
-            f'to a match of {game.title()}! {opp.mention}, do you accept? '
-            '(react with :white_check_mark: or :negative_squared_cross_mark:)'
-        )
-        await inv.add_reaction('✅')
-        await inv.add_reaction('❎')
-
-        def chk(r, u):
-            return u == opp and str(r.emoji) in '✅❎'
-
-        try:
-            reaction, user = await self.bot.wait_for(
-                'reaction_add', check=chk, timeout=30
-            )
-        except asyncio.TimeoutError:
-            await octx.send(
-                f'command timed out. it seems that {opp.display_name} '
-                'does not want to play rn. try someone else!'
-            )
-            self.ingame.remove(octx.author)
-            return 0
-        if str(reaction.emoji) == '❎':
-            await inv.reply(f'{opp.display_name} did not accept the challenge.')
-            self.ingame.remove(octx.author)
-            return 0
-        else:
-            await inv.reply(f'{opp.display_name} has accepted the challenge!')
-            self.ingame.append(opp)
-            return 1
-
-    async def done_playing(self, *args):
-        for player in args:
-            self.ingame.remove(player)
-
-
-# =============================================================================
 
 
 class UtilFeatures(commands.Cog):
@@ -876,18 +261,51 @@ class UtilFeatures(commands.Cog):
 
     @commands.command(name='modulo', aliases=['mod', 'modulus', 'remainder'])
     async def modulo(self, ctx: commands.Context, n1: float, n2: float):
-        """remainder of divison. usage: `modulo {n1, n2}"""
+        """remainder of divison. usage: `modulo n1, n2"""
         await ctx.send(f'{n1 % n2}')
 
     @commands.command(name='divmod', aliases=['floormod', 'floordivisionmodulo'])
     async def dvmd(self, ctx: commands.Context, n1: float, n2: float):
-        """division with remainder. usage: `divmod {n1, n2}"""
+        """division with remainder. usage: `divmod n1, n2"""
         res = divmod(n1, n2)
         await ctx.send(f'{res[0]}; {res[1]}')
 
 
-def setup(bot: commands.Bot):
-    bot.add_cog(GraphFeatures(bot))
-    bot.add_cog(GameFeatures(bot))
-    bot.add_cog(UtilFeatures(bot))
+class XOTD(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.wotd.start()
+
+    async def cog_unload(self) -> None:
+        self.wotd.cancel()
+        await super().cog_unload()
+
+    @tasks.loop(time=datetime.time(19, tzinfo=vsvs_config.TZI()))
+    async def wotd(self):
+        yesterday = await self.bot.database.get_wotd_yesterday()
+        channels = [
+            self.bot.get_channel(960200050389172344),  # testga cout
+            self.bot.get_channel(956339556435759136),  # smesper general
+        ]
+        title, summary, url, image = await wotd.oneworder()
+        ebd = discord.Embed(
+            title=f'Word of the Day #{yesterday[0] + 1}: {title}',
+            description=f'{summary}\n{url}',
+            colour=discord.Colour.dark_teal(),
+        )
+        if image:
+            ebd.set_image(url=image)
+        for channel in channels:
+            await channel.send(embed=ebd)
+        await self.bot.database.set_wotd_newday(title)
+
+    @wotd.before_loop
+    async def before_wotd(self):
+        await self.bot.wait_until_ready()
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(GraphFeatures(bot))
+    await bot.add_cog(UtilFeatures(bot))
+    await bot.add_cog(XOTD(bot))
     print('LOADED features')
