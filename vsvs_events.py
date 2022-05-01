@@ -1,7 +1,8 @@
 import discord
+import asyncio
 import vsvs_config
 import traceback
-import sys
+import aiofile
 from discord.ext import commands
 from datetime import datetime
 
@@ -34,13 +35,17 @@ class GeneralEvents(commands.Cog):
             msg = ''
             await ctx.send(error)
         now = datetime.now().strftime("%m/%d, %H:%M:%S")
-        with open(vsvs_config.errfile, 'a') as errfile:
-            errfile.write(
+        async with aiofile.async_open('vsvs_files/discord_err.txt', 'a') as errfile:
+            # TODO reverse file?
+            await errfile.write(
                 f'==================== {now} ====================\n'
                 f'{ctx.guild.name} ({ctx.channel.name}) - {ctx.author}: {ctx.message.content}\n'
             )
-            traceback.print_tb(error.__traceback__, None, errfile)
-            errfile.write('--------------------\n\n')
+            for item in traceback.StackSummary.from_list(
+                traceback.extract_tb(error.__traceback__)
+            ).format():
+                await errfile.write(f'{item}')
+            await errfile.write('--------------------\n\n')
         print(f"ERROR {now} -", error)
         if msg:
             await ctx.send(msg)
@@ -145,7 +150,7 @@ class MessageDeleteEvent(commands.Cog):
         await ctx.send(embed=embed_msg)
 
 
-def setup(bot: commands.Bot):
-    bot.add_cog(GeneralEvents(bot))
-    bot.add_cog(MessageDeleteEvent(bot))
+async def setup(bot: commands.Bot):
+    await bot.add_cog(GeneralEvents(bot))
+    await bot.add_cog(MessageDeleteEvent(bot))
     print('LOADED events')
