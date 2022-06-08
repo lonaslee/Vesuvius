@@ -289,7 +289,7 @@ class Tasks(commands.Cog):
         await super().cog_unload()
 
     def wotd(self):  # we need tzi from bot, but we don't have that until init
-        @tasks.loop(time=datetime.time(12, 10, 45, tzinfo=self.bot.timezoneinfo))
+        @tasks.loop(time=datetime.time(19, tzinfo=self.bot.timezoneinfo))
         async def wotd_inner(self):
             print("WOTD started")
             self.wotd_messages.clear()
