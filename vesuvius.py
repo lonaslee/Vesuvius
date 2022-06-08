@@ -23,6 +23,8 @@ class Bot(commands.Bot):
     def __init__(self) -> None:
         bot_intents = discord.Intents.all()
         super().__init__(command_prefix='`', help_command=None, intents=bot_intents)
+        self.files = vsvs_config.files_dict.copy()
+        self.timezoneinfo = vsvs_config.TZI()
         self.database = None
         self._db_cursor = None
         self._db_connnection = None
@@ -40,7 +42,7 @@ class Bot(commands.Bot):
         await self.load_extension('vsvs_testing')
 
     async def start(self, *args, **kwargs):
-        async with aiosqlite.connect('vsvs_files/vsvs_database.db') as conn:
+        async with aiosqlite.connect(self.files['database']) as conn:
             self._db_connnection = conn
             self._db_cursor = await self._db_connnection.cursor()
             self.database = vsvs_config.Database(self._db_connnection, self._db_cursor)
@@ -60,9 +62,11 @@ class Bot(commands.Bot):
 
 if __name__ == '__main__':
     logger = logging.getLogger('discord')
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     handler = logging.FileHandler(
-        filename='vsvs_files/discord_log.log', encoding='utf-8', mode='w'
+        filename=vsvs_config.files_dict['discord_log'].as_posix(),
+        encoding='utf-8',
+        mode='w',
     )
     handler.setFormatter(
         logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')

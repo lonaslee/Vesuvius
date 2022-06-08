@@ -1,6 +1,4 @@
 import discord
-import asyncio
-import vsvs_config
 import traceback
 import aiofile
 from discord.ext import commands
@@ -17,7 +15,6 @@ class GeneralEvents(commands.Cog):
     async def on_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ):
-        msg = ''
         if hasattr(ctx.command, 'on_error'):
             return
         if not isinstance(
@@ -25,21 +22,37 @@ class GeneralEvents(commands.Cog):
         ):
             self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
 
+        if (  # rid cooldown for owner
+            isinstance(error, commands.CommandOnCooldown)
+            and ctx.author.id == self.bot.owner_id
+        ):
+            self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
+            print("ERROR cooldown cleared for owner")
+            await ctx.send('cooldown cleared!')
+            # await commands.run_converters(ctx, None, ctx.message.content, commands.Parameter)
+            # how
+            return
+
         if isinstance(error, commands.NotOwner):
             msg = 'command for bot owner only.'
         elif isinstance(error, commands.CommandNotFound):
             if ctx.message.content.count('`') > 1:
                 return
-            msg = 'command not found. try doing `help for a list of all commands'
+            msg = (
+                f'command "{ctx.message.content.split()[0][1:]}" not found. '
+                'try doing `help for a list of all commands'
+            )
         else:
             msg = ''
             await ctx.send(error)
         now = datetime.now().strftime("%m/%d, %H:%M:%S")
-        async with aiofile.async_open('vsvs_files/discord_err.txt', 'a') as errfile:
+        async with aiofile.async_open(self.bot.files['discord_err'], 'a') as errfile:
             # TODO reverse file?
             await errfile.write(
                 f'==================== {now} ====================\n'
-                f'{ctx.guild.name} ({ctx.channel.name}) - {ctx.author}: {ctx.message.content}\n'
+                f'{ctx.guild.name if ctx.guild is not None else "DM"} '
+                f'({ctx.channel.name if ctx.guild is not None else "with"}) '
+                f'- {ctx.author}: {ctx.message.content}\n'
             )
             for item in traceback.StackSummary.from_list(
                 traceback.extract_tb(error.__traceback__)
@@ -81,6 +94,7 @@ class MessageDeleteEvent(commands.Cog):
         )
 
     @commands.command(name='snipe', aliases=['deletedmessage'])
+    @commands.guild_only()
     @commands.has_guild_permissions(
         administrator=True,
         ban_members=True,  # OR, not AND
@@ -108,8 +122,10 @@ class MessageDeleteEvent(commands.Cog):
                     f'{self.deld_num}{suffixes.get(self.deld_num, "th")} most recent message'
                 )
                 return
-            if which > (l := len(self.deleted_msgs)):
-                await ctx.send(f'currently only {l} deleted messages stored')
+            if which > len(self.deleted_msgs):
+                await ctx.send(
+                    f'currently only {len(self.deleted_msgs)} deleted messages stored'
+                )
                 return
             embed_msg = discord.Embed(
                 title=f'{which}{suffixes.get(which, "th")} most recent deleted message',

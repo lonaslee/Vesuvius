@@ -3,9 +3,9 @@ import discord
 import asyncio
 import datetime
 import re
-import vsvs_config
 from features import trianglecenters, transformations, wotd
 from matplotlib import pyplot as plt
+from pathlib import Path
 from itertools import combinations, chain
 from discord.ext import commands, tasks
 
@@ -17,9 +17,10 @@ class GraphFeatures(commands.Cog):
         self.bot = bot
 
     @commands.command(name='trianglecenters')
-    @commands.cooldown(rate=1, per=60, type=commands.BucketType(1))
+    @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
     async def trianglecenters(self, ctx: commands.Context, *, text: str = None):
-        """calculate orthocenter, circumcenter, and centroid from three coordinate points of a triangle. usage: `trianglecenters [x, y, x2, y2, x3, y3]"""
+        """calculate orthocenter, circumcenter, and centroid from three coordinate points of a triangle. usage:
+        \\`trianglecenters [x, y, x2, y2, x3, y3]"""
         a, b, c = {}, {}, {}
         nstr = False
         if text:
@@ -53,9 +54,7 @@ class GraphFeatures(commands.Cog):
             )
             return
         path = await self.plt_plt(ctx.message.author, mpa[0], mpa[1], mpa[2], a, b, c)
-        fobj = discord.File(
-            path, filename=path.removeprefix('vsvs_files/trianglecenters/')
-        )
+        fobj = discord.File(path)
         embed_msg = discord.Embed(
             title='Triangle Centers',
             description=f'```py\n{fsnw if nstr else fs}```',
@@ -87,10 +86,16 @@ class GraphFeatures(commands.Cog):
             return await self.get_point(ctx, ptn)
         return float(x), float(y)
 
-    @staticmethod
     async def plt_plt(
-        caller, ortho: tuple, circum: tuple, medi: tuple, a: dict, b: dict, c: dict
-    ):
+        self,
+        caller,
+        ortho: tuple,
+        circum: tuple,
+        medi: tuple,
+        a: dict,
+        b: dict,
+        c: dict,
+    ) -> Path:
         a = (a['x'], a['y'])
         b = (b['x'], b['y'])
         c = (c['x'], c['y'])
@@ -101,7 +106,6 @@ class GraphFeatures(commands.Cog):
             pt[3][1] for pt in [ortho, circum, medi]
         ]
         mx, mn = round(max(xes + yes)), round(min(xes + yes))
-        axis = mx * 1.25 if mx > abs(mn) else mn * 1.25
         if mn >= 0:
             plt.xlim(0, mx * 1.25)
             plt.ylim(0, mx * 1.25)
@@ -116,13 +120,13 @@ class GraphFeatures(commands.Cog):
         colors = ['black', 'black', 'black', 'blue', 'green', 'purple']
         list(
             map(
-                lambda x, y, m, c: plt.plot(  # plot all points
+                lambda x, y, m, clr: plt.plot(  # plot all points
                     [x],
                     [y],
                     marker=m,
                     markersize=5,
-                    markeredgecolor=c,
-                    markerfacecolor=c,
+                    markeredgecolor=clr,
+                    markerfacecolor=clr,
                 ),
                 xes,
                 yes,
@@ -141,15 +145,16 @@ class GraphFeatures(commands.Cog):
             )
         tme = datetime.datetime.now().strftime('%H%M%S')
         plt.savefig(
-            fl := f'vsvs_files/trianglecenters/{tme}--{str(caller).replace("#", "")}--plot.png'
+            fl := Path(
+                f'{self.bot.files["trianglecenters"].as_posix()}/'
+                f'{tme}--{str(caller).replace("#", "")}--plot.png'
+            )
         )
         plt.clf()
         return fl
 
-    # =========================================================================
-
     @commands.command(name='transformations')
-    @commands.cooldown(rate=1, per=60, type=commands.BucketType(1))
+    @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
     async def transformations(self, ctx: commands.Context, *, text: str = None):
         """compute translations, reflections, rotations, and dilations on a set of points. usage: `transformations [x, y, ...]"""
         pt_lst = []
@@ -170,7 +175,6 @@ class GraphFeatures(commands.Cog):
                     return  # get_point timed out and returned None
                 pt_lst.append((tup[0], tup[1]))
         aps = await self.bot.run_in_tpexec(lambda: transformations.AllPoints(pt_lst))
-        ap_str = '\n'.join([str(p) for p in aps.allpoints])
         for n in range(100):
             res = await self.get_inp(ctx)
             if res is None:
@@ -186,9 +190,7 @@ class GraphFeatures(commands.Cog):
                 timestamp=datetime.datetime.utcnow(),
             )
             path = await self.graph_fig(aps, ctx.message.author)
-            fobj = discord.File(
-                path, filename=path.removeprefix('vsvs_files/transformations/')
-            )
+            fobj = discord.File(path)
             embed_msg.set_image(url=f'attachment://{fobj.filename}')
             await ctx.send(file=fobj, embed=embed_msg)
             if res == 'end':
@@ -200,8 +202,9 @@ class GraphFeatures(commands.Cog):
         def chki(m):
             return m.author == ctx.message.author and m.channel == ctx.channel
 
+        msg = None
         try:
-            msg = await self.bot.wait_for(event='message', check=chki, timeout=30)
+            msg = await self.bot.wait_for('message', check=chki, timeout=30)
             if msg.content == 'end':
                 return 'end'
             ap_mtd, ap_args = await self.bot.run_in_tpexec(
@@ -215,8 +218,7 @@ class GraphFeatures(commands.Cog):
             return await self.get_inp(ctx)
         return ap_mtd, ap_args
 
-    @staticmethod
-    async def graph_fig(apts: transformations.AllPoints, caller):
+    async def graph_fig(self, apts: transformations.AllPoints, caller) -> Path:
         avs = list(chain.from_iterable([[p.x, p.y] for p in apts.allpoints]))
         mx, mn = round(max(avs)), round(min(avs))
         axis = mx * 1.25 if mx > abs(mn) else mn * 1.25
@@ -249,7 +251,10 @@ class GraphFeatures(commands.Cog):
             )
         tme = datetime.datetime.now().strftime('%H%M%S')
         plt.savefig(
-            fl := f'vsvs_files/transformations/{tme}--{str(caller).replace("#", "")}--plot.png'
+            fl := Path(
+                f'{self.bot.files["transformations"].as_posix()}/'
+                f'{tme}--{str(caller).replace("#", "")}--plot.png'
+            )
         )
         plt.clf()
         return fl
@@ -271,22 +276,39 @@ class UtilFeatures(commands.Cog):
         await ctx.send(f'{res[0]}; {res[1]}')
 
 
-class XOTD(commands.Cog):
+class Tasks(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.wotd.start()
+        self.wotd_messages = []
+        self.wotd_loop = None
+        self.wotd()
+        self.wotd_loop.start(self)
 
     async def cog_unload(self) -> None:
         self.wotd.cancel()
         await super().cog_unload()
 
-    @tasks.loop(time=datetime.time(19, tzinfo=vsvs_config.TZI()))
-    async def wotd(self):
-        yesterday = await self.bot.database.get_wotd_yesterday()
-        channels = [
-            self.bot.get_channel(960200050389172344),  # testga cout
+    def wotd(self):  # we need tzi from bot, but we don't have that until init
+        @tasks.loop(time=datetime.time(12, 10, 45, tzinfo=self.bot.timezoneinfo))
+        async def wotd_inner(self):
+            print("WOTD started")
+            self.wotd_messages.clear()
+            ebd = await self.get_wotd()
+            for channel in await self.wotd_channels():
+                msg = await channel.send(embed=ebd)
+                self.wotd_messages.append(msg)
+
+        self.wotd_loop = wotd_inner
+
+    async def wotd_channels(self) -> list[discord.TextChannel]:
+        return [
             self.bot.get_channel(956339556435759136),  # smesper general
+            self.bot.get_channel(960200050389172344),  # testga cout
+            self.bot.get_channel(972593770283565169),  # testoo clog
         ]
+
+    async def get_wotd(self, redo=False) -> discord.Embed:
+        yesterday = await self.bot.database.get_wotd_yesterday()
         title, summary, url, image = await wotd.oneworder()
         ebd = discord.Embed(
             title=f'Word of the Day #{yesterday[0] + 1}: {title}',
@@ -295,17 +317,48 @@ class XOTD(commands.Cog):
         )
         if image:
             ebd.set_image(url=image)
-        for channel in channels:
-            await channel.send(embed=ebd)
-        await self.bot.database.set_wotd_newday(title)
+        if not redo:
+            await self.bot.database.set_wotd_newday(title)
+        return ebd
 
-    @wotd.before_loop
-    async def before_wotd(self):
-        await self.bot.wait_until_ready()
+    @commands.command(name='wotdmanual')
+    @commands.is_owner()
+    @commands.guild_only()
+    async def wotdmanual(self, ctx: commands.Context):
+        self.wotd_messages.clear()
+        ebd = await self.get_wotd()
+        for channel in self.wotd_channels:
+            msg = await channel.send(embed=ebd)
+            self.wotd_messages.append(msg)
+        await ctx.send('done.')
+
+    @commands.command(name='wotdnew')
+    @commands.is_owner()
+    @commands.guild_only()
+    async def wotdnew(self, ctx: commands.Context):
+        def chk(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        await ctx.send("are you sure you want to change today's wotd?")
+        try:
+            m = await self.bot.wait_for('message', check=chk, timeout=10)
+        except asyncio.TimeoutError:
+            await ctx.send('wotd redo cancelled.')
+            return
+        if m.content == 'yes':
+            ebd = await self.get_wotd(True)
+            for k, channel in enumerate(self.wotd_channels):
+                msg = await (
+                    await channel.fetch_message(self.wotd_messages[k].id)
+                ).edit(embed=ebd)
+                self.wotd_messages[k] = msg
+            await ctx.send('done.')
+        else:
+            await ctx.send('ok.')
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(GraphFeatures(bot))
     await bot.add_cog(UtilFeatures(bot))
-    await bot.add_cog(XOTD(bot))
+    await bot.add_cog(Tasks(bot))
     print('LOADED features')
