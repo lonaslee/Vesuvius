@@ -13,7 +13,7 @@ from aiofiles import open as aopen
 from matplotlib import pyplot as plt
 
 from extensions import trianglecenters, transformations, wotd
-from definitions import ANSIColors as C
+from extensions.definitions import ANSIColors as C, TZI
 
 
 class GraphFeatures(commands.Cog):
@@ -298,24 +298,23 @@ class UtilFeatures(commands.Cog):
         if 'sep=' in args[-1]:
             sep = args[-1][4:]
             args = tuple(args[0:-1])
-        if ((alen := len(args)) > 15 and length > 10) or (alen > 30 and length > 4):
+        numof = math.factorial(arg_len := len(args)) / math.factorial(arg_len - length)
+        if numof > 2000:
             await ctx.send(
                 f'{C.B}{C.RED}result too large.{C.GREEN} number of permutations: '
-                f'{C.CYAN}{math.factorial(alen) / math.factorial(alen - length)}.{C.END}'
+                f'{C.CYAN}{numof}.{C.END}'
             )
         pers = await self.bot.run_in_tpexec(
             lambda: itertools.permutations(args, length)
         )
-        joined = [sep.join(a) for a in pers]
-        nl_joined = "\n".join(joined)
-        numof = len(joined)
+        joined = '\n'.join([sep.join(a) for a in pers])
         s_now = datetime.now().strftime('%m_%d_%y__%H_%M_%S')
         if numof > 40:
             async with aopen(
                 path := f'{self.bot.files["text_files"].as_posix()}/permutations{s_now}.txt',
                 'w',
             ) as f:
-                await f.write(nl_joined)
+                await f.write(joined)
             fobj = discord.File(path, filename=f'permutations_{s_now}.txt')
             await ctx.send(
                 f'{C.B}{C.GREEN}{numof} permutations of {length} length in attached file:{C.E}',
@@ -323,7 +322,7 @@ class UtilFeatures(commands.Cog):
             )
         else:
             await ctx.send(
-                f'{C.B}{C.GREEN}{numof} permutations of {length} length:{C.CYAN}\n{nl_joined}{C.E}'
+                f'{C.B}{C.GREEN}{numof} permutations of {length} length:{C.CYAN}\n{joined}{C.E}'
             )
 
     @commands.command(name='combinations', aliases=['nCr', 'ncr'])
@@ -337,24 +336,27 @@ class UtilFeatures(commands.Cog):
         if 'sep=' in args[-1]:
             sep = args[-1][4:]
             args = tuple(args[0:-1])
-        if ((alen := len(args)) > 15 and length > 10) or (alen > 30 and length > 4):
+        numof = (
+            math.factorial(arg_len := len(args))
+            / math.factorial(length)
+            * math.factorial(arg_len - length)
+        )
+        if arg_len > 2000:
             await ctx.send(
                 f'{C.B}{C.RED}result too large.{C.GREEN} number of permutations: '
-                f'{C.CYAN}{math.factorial(alen) / (math.factorial(length) * math.factorial(alen - length))}.{C.END}'
+                f'{C.CYAN}{arg_len}.{C.END}'
             )
         pers = await self.bot.run_in_tpexec(
             lambda: itertools.combinations(args, length)
         )
-        joined = [sep.join(a) for a in pers]
-        nl_joined = "\n".join(joined)
-        numof = len(joined)
+        joined = '\n'.join([sep.join(a) for a in pers])
         s_now = datetime.now().strftime('%m_%d_%y__%H_%M_%S')
         if numof > 40:
             async with aopen(
                 path := f'{self.bot.files["text_files"].as_posix()}/combinations{s_now}.txt',
                 'w',
             ) as f:
-                await f.write(nl_joined)
+                await f.write(joined)
             fobj = discord.File(path, filename=f'combinations_{s_now}.txt')
             await ctx.send(
                 f'{C.B}{C.GREEN}{numof} combinations of {length} length in attached file:{C.E}',
@@ -362,7 +364,7 @@ class UtilFeatures(commands.Cog):
             )
         else:
             await ctx.send(
-                f'{C.B}{C.GREEN}{numof} combinations of {length} length:{C.CYAN}\n{nl_joined}{C.E}'
+                f'{C.B}{C.GREEN}{numof} combinations of {length} length:{C.CYAN}\n{joined}{C.E}'
             )
 
 
@@ -370,28 +372,26 @@ class Tasks(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.wotd_messages = []
-        self.wotd_loop = None
-        self.wotd()
-        self.wotd_loop.start(self)
+        self.wotd_channels = []
+        self.wotd.start()
 
     async def cog_unload(self) -> None:
         self.wotd.cancel()
         await super().cog_unload()
 
-    def wotd(self):  # we need tzi from bot, but we don't have that until init
-        @tasks.loop(time=dt_time(19, tzinfo=self.bot.timezoneinfo))
-        async def wotd_inner(self):
-            print("WOTD started")
-            self.wotd_messages.clear()
-            ebd = await self.get_wotd()
-            for channel in await self.wotd_channels():
-                msg = await channel.send(embed=ebd)
-                self.wotd_messages.append(msg)
+    @tasks.loop(time=dt_time(19, tzinfo=TZI()))
+    async def wotd(self):
+        print("WOTD started")
+        self.wotd_messages.clear()
+        ebd = await self.get_wotd()
+        for channel in self.wotd_channels:
+            msg = await channel.send(embed=ebd)
+            self.wotd_messages.append(msg)
 
-        self.wotd_loop = wotd_inner
-
-    async def wotd_channels(self) -> list[discord.TextChannel]:
-        return [
+    @wotd.before_loop
+    async def before_wotd(self):
+        await self.bot.wait_until_ready()
+        self.wotd_channels = [
             self.bot.get_channel(956339556435759136),  # smesper general
             self.bot.get_channel(960200050389172344),  # testga cout
             self.bot.get_channel(972593770283565169),  # testoo clog
@@ -416,8 +416,9 @@ class Tasks(commands.Cog):
     @commands.guild_only()
     async def wotdmanual(self, ctx: commands.Context):
         self.wotd_messages.clear()
+        await ctx.send(f'{C.B}{C.RED}wotd manual start. DO THE DB{C.E}')
         ebd = await self.get_wotd(self.bot.files['words_alpha'])
-        for channel in await self.wotd_channels():
+        for channel in self.wotd_channels:
             msg = await channel.send(embed=ebd)
             self.wotd_messages.append(msg)
         await ctx.send(f'{C.B}{C.BOLD_GREEN}done.{C.E}')

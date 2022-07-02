@@ -10,7 +10,7 @@ import discord
 from discord.ext import commands
 
 import config
-import definitions
+from extensions import definitions
 
 
 async def main():
@@ -23,20 +23,19 @@ class Bot(commands.Bot):
     def __init__(self) -> None:
         bot_intents = discord.Intents.all()
         super().__init__(
-            command_prefix='`',
+            command_prefix=commands.when_mentioned_or('`'),
             help_command=None,
             intents=bot_intents,
             status=discord.Status.dnd,
             activity=discord.Game('among us'),
         )
 
-        self.start_time = None
+        self.start_time: datetime = None
         self.files = config.files_dict.copy()
-        self.timezoneinfo = config.TZI()
 
-        self.database = None
-        self._db_cursor = None
-        self._db_connnection = None
+        self.database: definitions.Database = None
+        self._db_cursor: aiosqlite.Cursor = None
+        self._db_connnection: aiosqlite.Connection = None
         self._tpexecutor = ThreadPoolExecutor(1)
 
     async def run_in_tpexec(self, func):

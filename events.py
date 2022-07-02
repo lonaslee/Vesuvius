@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 from aiofiles import open as aopen
 
-from definitions import ANSIColors as C
+from extensions.definitions import ANSIColors as C
 
 
 class GeneralEvents(commands.Cog):
@@ -25,27 +25,16 @@ class GeneralEvents(commands.Cog):
         if hasattr(ctx.command, 'on_error'):
             return
 
-        if not isinstance(
-            error, (commands.CommandOnCooldown, commands.CommandNotFound)
-        ):
-            self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
-
-        if (  # rid cooldown for owner
-            isinstance(error, commands.CommandOnCooldown)
-            and ctx.author.id == self.bot.owner_id
-        ):
-            self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
-            print("ERROR cooldown cleared for owner")
-            await ctx.send(f'{C.B}{C.GREEN}cooldown cleared!{C.E}')
-            # await commands.run_converters(ctx, None, ctx.message.content, commands.Parameter)
-            # how
-            return
-
         if (
             isinstance(error, commands.CommandNotFound)
             and ctx.message.content.count('`') > 1
         ):
             return
+
+        if not isinstance(
+            error, (commands.CommandOnCooldown, commands.CommandNotFound)
+        ):
+            self.bot.get_command(ctx.command.name).reset_cooldown(ctx)
 
         await ctx.send(f'{C.B}{C.RED}{error}{C.E}')
         await self.log_exception(ctx, error)

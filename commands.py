@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from definitions import owner_bypass, ANSIColors as C
+from extensions.definitions import owner_bypass, ANSIColors as C
 
 
 class OwnerCommands(commands.Cog):
@@ -32,14 +32,21 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='reload', aliases=['r'])
     @commands.is_owner()
-    async def reload(self, ctx: commands.Context):
-        await ctx.send(f'{C.B}{C.BOLD_GREEN}reloading.{C.E}')
-        print('RELOADING extensions')
-        await self.bot.reload_extension('commands')
-        await self.bot.reload_extension('events')
-        await self.bot.reload_extension('features')
-        await self.bot.reload_extension('games')
-        await self.bot.reload_extension('testing')
+    async def reload(
+        self,
+        ctx: commands.Context,
+        extension: Literal['all', 'commands', 'events', 'features', 'games', 'testing'],
+    ):
+        await ctx.send(f'{C.B}{C.BOLD_GREEN}Reloading {C.YELLOW}{extension}.{C.E}')
+        print(f'RELOADING {extension}')
+        if extension == 'all':
+            await self.bot.reload_extension('commands')
+            await self.bot.reload_extension('events')
+            await self.bot.reload_extension('features')
+            await self.bot.reload_extension('games')
+            await self.bot.reload_extension('testing')
+            return
+        await self.bot.reload_extension(extension)
 
     @commands.command(name='sync')
     @commands.is_owner()
@@ -284,8 +291,10 @@ class GeneralCommands(commands.Cog):
     async def default_help() -> discord.Embed:
         embed_msg = discord.Embed(
             title='Vesuvius#8475',
-            description='small bot that will have more stuff added gradually\n\n**prefix: \\` (backtick)**\n'
-            f'{C.B}{C.YELLOW}`help {C.GRAY_H_LIGHT_GRAY}[command]\n[]{C.YELLOW}: optional arguments, {C.GRAY_H_LIGHT_GRAY}{{}}{C.YELLOW}: possible values{C.E}',
+            description='small bot that will have more stuff added gradually'
+            '\n\n**prefix: \\` (backtick)**\n'
+            f'{C.B}{C.YELLOW}`help {C.RED}[command]\n[]{C.YELLOW}: '
+            f'optional arguments, {C.RED}{{}}{C.YELLOW}: possible values{C.E}',
             colour=discord.Colour.dark_orange(),
         )
         cmds = '\n`'.join(['`help', 'info', 'leaderboard', 'snipe', 'source'])
@@ -308,7 +317,7 @@ class GeneralCommands(commands.Cog):
 
         embed_msg.add_field(
             name='errors:',
-            value='report all bugs (there are a lot of them)\nto @zhona#2155 with a ping',
+            value='report all bugs (there are a lot of them) to zhona#2155',
             inline=False,
         )
         embed_msg.set_footer(

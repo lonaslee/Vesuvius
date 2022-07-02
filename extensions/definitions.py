@@ -1,32 +1,62 @@
 from __future__ import annotations
 
-import discord
+import datetime
+
 import aiosqlite
+import discord
 
 import config
 
 
-class InteractionContextAdapter:
-    def __init__(self, interaction: discord.Interaction) -> None:
-        self.author = interaction.user
-        self.channel = interaction.channel
-        self.isend = interaction.response.send_message
-        self._calltimes = 0
+NUM_EMOTES = (
+    '1\N{variation selector-16}\N{combining enclosing keycap}',
+    '2\N{variation selector-16}\N{combining enclosing keycap}',
+    '3\N{variation selector-16}\N{combining enclosing keycap}',
+    '4\N{variation selector-16}\N{combining enclosing keycap}',
+    '5\N{variation selector-16}\N{combining enclosing keycap}',
+    '6\N{variation selector-16}\N{combining enclosing keycap}',
+    '7\N{variation selector-16}\N{combining enclosing keycap}',
+    '8\N{variation selector-16}\N{combining enclosing keycap}',
+    '9\N{variation selector-16}\N{combining enclosing keycap}',
+    '🔟',
+)
 
-    async def send(self, message):
-        if self._calltimes:
-            await self.channel.send(message)
-        else:
-            await self.isend(message)
-            self._calltimes = 1
+CHAR_EMOTES = (
+    '\U0001f1e6',
+    '\U0001f1e7',
+    '\U0001f1e8',
+    '\U0001f1e9',
+    '\U0001f1ea',
+    '\U0001f1eb',
+    '\U0001f1ec',
+    '\U0001f1ed',
+    '\U0001f1ee',
+    '\U0001f1ef',
+    '\U0001f1f0',
+    '\U0001f1f1',
+    '\U0001f1f2',
+    '\U0001f1f3',
+    '\U0001f1f4',
+    '\U0001f1f5',
+    '\U0001f1f6',
+    '\U0001f1f7',
+    '\U0001f1f8',
+    '\U0001f1f9',
+    '\U0001f1fa',
+    '\U0001f1fb',
+    '\U0001f1fc',
+    '\U0001f1fd',
+    '\U0001f1fe',
+    '\U0001f1ff',
+)
 
 
-def owner_bypass(time: int) -> function:
+def owner_bypass(time: int) -> object:
     """return a function that returns a Cooldown of time length, except for the owner"""
 
     def cooldown_func(
         message: discord.Message | discord.Interaction,
-    ) -> discord.app_commands.Cooldown:
+    ) -> discord.app_commands.Cooldown | None:
         if (
             isinstance(message, discord.Message)
             and message.author.id == config.owner_id
@@ -42,13 +72,26 @@ def owner_bypass(time: int) -> function:
     return cooldown_func
 
 
+class TZI(datetime.tzinfo):
+    def utcoffset(self, __dt: datetime.datetime | None):
+        return datetime.timedelta(hours=-5)
+
+    def dst(self, __dt: datetime.datetime | None):
+        return datetime.timedelta(
+            0
+        )  # FIXME timezone, or wait until the last cycle of daylight
+
+    def tzname(self, __dt: datetime.datetime | None) -> str | None:
+        return 'central time'
+
+
 class Database:
     def __init__(self, con: aiosqlite.Connection, csr: aiosqlite.Cursor) -> None:
         self.connection = con
         self.cursor = csr
 
     def __str__(self) -> str:
-        return f'{self.connection}, {self.cursor}'
+        return f'{self.connection} {self.cursor}'
 
     async def set_games_winloss(
         self, winner_id: int, loser_id: int, game: str, tie: bool = False
@@ -123,11 +166,11 @@ class Database:
         )
         await self.connection.commit()
 
-    async def get_wotd_yesterday(self) -> tuple[int, str]:
+    async def get_wotd_yesterday(self) -> aiosqlite.Row | None:
         await self.cursor.execute('SELECT * FROM wotd ORDER BY day DESC LIMIT 1')
         return await self.cursor.fetchone()
 
-    async def set_wotd_newday(self, word):
+    async def set_wotd_newday(self, word: str):
         yesterday = await self.get_wotd_yesterday()
         await self.cursor.execute(
             'INSERT INTO wotd VALUES (?, ?)', (yesterday[0] + 1, word)
