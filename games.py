@@ -1,28 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import datetime
-from collections import namedtuple
+import re
 from math import radians
 from random import randint
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, Optional, cast
 
 import discord
 from aiofiles import open as aopen
 from discord import ui
-from discord import app_commands
 from discord.ext import commands
 
-from extensions.transformations import AllPoints
-from extensions.definitions import ANSIColors as C, NUM_EMOTES
+from extensions import ANSIColors as C
+from extensions.definitions import NUM_EMOTES, owner_bypass
+from extensions.transformations import AllPoints, Point
+
+if TYPE_CHECKING:
+    from vesuvius import Vesuvius
 
 
 class BaseSquare:
     """Base class for a square on any board."""
 
     def __init__(self) -> None:
-        self.occupier: Literal['1', '2', '0'] = '0'
+        self.occupier: Literal['1', '2', '0'] | str = '0'
 
 
 class BaseBoard:
@@ -47,44 +49,24 @@ class BaseBoard:
         p2_emoji: str,
         empty_emoji: str,
         length: int,
-        square_type: type[BaseSquare],
+        square_type: type[BaseSquare] = BaseSquare,
     ) -> None:
         """Initialize a board."""
-        self.p1_emoji = p1_emoji
-        self.p2_emoji = p2_emoji
-        self.no_emoji = empty_emoji
-        self.length = length
-        self.square_type = square_type
-        self._all_squares: list[BaseSquare] = [
-            self.square_type() for _ in range(self.length * self.length)
-        ]
+        ...
 
     def __str__(self) -> str:
-        return '\n'.join(
-            reversed(
-                [
-                    ''.join([square.occupier for square in square_slice])
-                    for square_slice in [
-                        self._all_squares[i : i + self.length]
-                        for i in range(0, self.length * self.length, self.length)
-                    ]
-                ]
-            )
-        )
+        ...
 
-    async def to_emojis(self) -> str:
+    async def to_emojis(
+        self,
+    ) -> str | tuple[str, ...] | discord.Embed | list[discord.Embed]:
         """Convert to discord emojis.
 
         This returns a string version of the board ready to be sent directly to discord.
         """
-        return (
-            str(self)
-            .replace('1', self.p1_emoji)
-            .replace('2', self.p2_emoji)
-            .replace('0', self.no_emoji)
-        )
+        ...
 
-    async def is_valid_square(self, x: int, y: int, value: str) -> bool:
+    async def is_valid_square(self, x: int, y: int, value: Literal['1', '2']) -> bool:
         """Check if a player can place a piece in x, y.
 
         x and y are not compared to the size of the board,
@@ -93,9 +75,7 @@ class BaseBoard:
         By default this decides based on whether the spot is empty, but
         it can be overriden for special games.
         """
-        if self._all_squares[self.length * y - self.length + x - 1].occupier == '0':
-            return True
-        return False
+        ...
 
     async def set_square(self, x: int, y: int, value: Literal['1', '2']) -> None:
         """Set a square to a new value.
@@ -103,9 +83,9 @@ class BaseBoard:
         This assumes that setting the square does not break any game rules,
         and that x and y are within the board range.
         """
-        self._all_squares[self.length * y - self.length + x - 1].occupier = value
+        ...
 
-    async def check_win(self) -> Literal['0', '1', '2'] | None:
+    async def check_win(self) -> Literal['0', '1', '2'] | None | tuple[int, int]:
         """Check for a winner on the board.
 
         This method is game specific, override in subclasses.
@@ -195,20 +175,31 @@ class BoardMessage:
     def __init__(
         self, message: discord.Message | list[discord.Message], board: BaseBoard
     ) -> None:
-        self.message = message
-        self.board = board
+        self.message: discord.Message | list[discord.Message] = message
+        self.board: BaseBoard = board
 
     async def update(self) -> None:
+        await self.update_message(await self.board.to_emojis())
+
+    async def update_message(
+        self, new: str | tuple[str] | discord.Embed | list[discord.Embed]
+    ):
         if isinstance(self.message, discord.Message):
-            if self.message.embeds:
-                self.message = await self.message.edit(
-                    embeds=await self.board.to_emojis()
-                )
-                return None
-            self.message = await self.message.edit(content=await self.board.to_emojis())
-            return None
-        for k, v in enumerate(await self.board.to_emojis()):
+            if isinstance(new, str):
+                self.message = await self.message.edit(content=new)
+                return
+            elif isinstance(new, discord.Embed):
+                self.message = await self.message.edit(embed=new)
+                return
+            elif isinstance(new, list):
+                self.message = await self.message.edit(embeds=new)
+                return
+            raise TypeError
+
+        self.message = cast(list[discord.Message], self.message)
+        for k, v in enumerate(cast(tuple[str], new)):
             self.message[k] = await self.message[k].edit(content=v)
+        return
 
 
 class Player:
@@ -219,7 +210,7 @@ class Player:
         self.mention = m.mention
 
         self.symbol: str = ''
-        self.number: str = ''
+        self.number: Literal['1', '2'] = '1'
         self.color: str = ''
 
     def __str__(self) -> str:
@@ -254,7 +245,7 @@ class BaseGame:
 
     def __init__(
         self,
-        ctx: commands.Context,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         bot: commands.Bot,
         opponent: discord.Member,
         board_type: type[BaseBoard],
@@ -267,32 +258,7 @@ class BaseGame:
         input_wait_time: int,
     ) -> None:
         """Initalize the game."""
-        self.winner: discord.Member = None
-        self.loser: discord.Member = None
-        self.tie: bool = False
-
-        self._ctx = ctx
-        self._bot = bot
-        self._board: type[BaseBoard] = board_type()
-        self._board_msg: BoardMessage = None
-        self._prompt_msg: PromptMessage = None
-
-        self._numof_loops = numof_loops
-        self._input_regex = input_regex
-        self._wait_time = input_wait_time
-        self._input_occupied_error = 'occupied'
-        self._input_format_error = 'fmt_error'
-        self._flush = False
-
-        self._player1 = Player(ctx.author)
-        self._player2 = Player(opponent)
-
-        if randint(0, 1):
-            self._player1, self._player2 = self._player2, self._player1
-
-        self._player1.number, self._player2.number = '1', '2'
-        self._player1.symbol, self._player2.symbol = symbol1, symbol2
-        self._player1.color, self._player2.color = color1, color2
+        ...
 
     async def start(self) -> None:
         """Start the game.
@@ -320,28 +286,7 @@ class BaseGame:
 
         _loop_end
         """
-        if await self._loop_begin():
-            return None
-        this_turn, next_turn = self._player2, self._player1
-        for _ in range(self._numof_loops):
-            this_turn, next_turn = next_turn, this_turn
-
-            if await self._iter_begin(this_turn, next_turn):
-                return None
-
-            x, y = await self._get_coord(this_turn, next_turn)
-            if x == 'timeout':
-                await self._timeout(this_turn, next_turn)
-                return None
-            if x == 'end':
-                await self._end(this_turn, next_turn)
-                return None
-
-            await self._board.set_square(x, y, this_turn.number)
-            if await self._iter_end(this_turn, next_turn):
-                return None
-        await self._loop_end(this_turn, next_turn)
-        return None
+        ...
 
     async def _loop_begin(self) -> bool:
         """Called before the input loop starts.
@@ -352,18 +297,7 @@ class BaseGame:
 
         If this method returns True, the game will exit.
         """
-        await self._ctx.send(
-            f'{C.B}{self._player1.color}{self._player1.symbol}: {self._player1}, '
-            f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
-        )
-        self._board_msg = BoardMessage(
-            await self._ctx.send(await self._board.to_emojis()), self._board
-        )
-        self._prompt_msg = PromptMessage(
-            await self._ctx.send(
-                f"{self._player1.mention} {self._player1.symbol}'s turn!"
-            )
-        )
+        ...
         return False
 
     async def _iter_begin(self, this_turn: Player, next_turn: Player) -> bool:
@@ -373,8 +307,7 @@ class BaseGame:
 
         If this method returns True, the game will exit.
         """
-        await self._prompt_msg.update(this_turn)
-        return False
+        ...
 
     async def _iter_end(self, this_turn: Player, next_turn: Player) -> bool:
         """Called at the end of every iteration of the input loop, after a
@@ -386,23 +319,15 @@ class BaseGame:
 
         If the method returns True, the game will exit.
         """
-        if self._flush:
-            self._flush = False
-            await self._flush_channel()
-
-        await self._board_msg.update()
-        if await self._check_board_win(this_turn, next_turn):
-            return True
-        return False
+        ...
 
     async def _timeout(self, this_turn: Player, next_turn: Player) -> None:
         """Called when this turn's player times out."""
-        self.winner = next_turn.member
-        self.loser = this_turn.member
+        ...
 
     async def _end(self, this_turn: Player, next_turn: Player) -> None:
         """Called when an end request is accepted."""
-        await self._check_board_win(this_turn, next_turn, force=True)
+        ...
 
     async def _loop_end(self, this_turn: Player, next_turn: Player) -> None:
         """Called when the input loop exits.
@@ -410,9 +335,7 @@ class BaseGame:
         By default this sets the attribute `tie` to True,
         override this for different behavior.
         """
-        self.winner = this_turn.member
-        self.loser = next_turn.member
-        self.tie = True
+        ...
 
     async def _check_board_win(
         self, this_turn: Player, next_turn: Player, *, force: bool = False
@@ -422,18 +345,7 @@ class BaseGame:
         By default this sets the attribute `winner` to the player of the current turn,
         override this for different behavior.
         """
-        if await self._board.check_win() != '0' or force:
-            await self._prompt_msg.winner(this_turn)
-            self.winner = this_turn.member
-            self.loser = next_turn.member
-            return True
-        if force:
-            await self._prompt_msg.draw()
-            self.winner = this_turn.member
-            self.loser = next_turn.member
-            self.tie = True
-            return True
-        return False
+        ...
 
     async def _flush_channel(self) -> None:
         async for msg in self._prompt_msg.message.channel.history(limit=10):
@@ -455,81 +367,17 @@ class BaseGame:
         * On timeout, return tuple[Literal['timeout'], None]
         * On end request, return tuple[Literal['end'], None]
         """
-        timeout = end = flush = False
-
-        def check(m: discord.Message):
-            if m.content == 'fflush' and m.author in {
-                this_turn.member,
-                next_turn.member,
-            }:
-                self._flush = True
-                return False
-            if m.content.startswith('//'):
-                return False
-            if end:
-                return m.author == next_turn.member and m.channel == self._ctx.channel
-            return m.author == this_turn.member and m.channel == self._ctx.channel
-
-        while True:
-            if flush:
-                async for msg in self._prompt_msg.message.channel.history(limit=10):
-                    if msg == self._prompt_msg.message:
-                        break
-                    await msg.delete()
-
-            try:
-                message = await self._bot.wait_for(
-                    'message', check=check, timeout=self._wait_time
-                )
-                await message.delete()
-                timeout = False
-                x, y = re.search(self._input_regex, message.content).groups()
-                x, y = int(x), int(y)
-
-                if not await self._board.is_valid_square(x, y, this_turn.number):
-                    await getattr(self._prompt_msg, self._input_occupied_error)(
-                        this_turn
-                    )
-                    continue
-
-                return x, y
-            except asyncio.TimeoutError:
-                if timeout:
-                    await self._prompt_msg.timeout(this_turn, next_turn)
-                    return 'timeout', None
-                timeout = True
-                await self._prompt_msg.hurry(this_turn)
-                continue
-            except AttributeError:
-                if end:
-                    if message.content.lower() in {'yes', 'ye', 'ok', 'k'}:
-                        return 'end', None
-                    else:
-                        await self._prompt_msg.continue_game(this_turn)
-                        end = False
-                        continue
-
-                if 'end' in message.content.lower():
-                    end = True
-                    await self._prompt_msg.end_request(this_turn, next_turn)
-                    continue
-
-                await getattr(self._prompt_msg, self._input_format_error)(this_turn)
-                continue
+        ...
 
 
 # subclasses ===========================================================================
 
 
-class TicTacToeSquare(BaseSquare):
-    pass
-
-
 class TicTacToeBoard(BaseBoard):
     def __init__(self) -> None:
-        super().__init__(':x:', ':o:', ':question:', 3, TicTacToeSquare)
+        super().__init__(':x:', ':o:', ':question:', 3)
 
-    async def check_win(self) -> Literal['0', 'y']:
+    async def check_win(self) -> Literal['0', '1']:
         anylst = [
             self._all_equal(ls)
             for ls in [self._all_squares[i : i + 3] for i in (0, 3, 6)]
@@ -537,11 +385,11 @@ class TicTacToeBoard(BaseBoard):
         anylst.append(self._all_equal([self._all_squares[i] for i in (0, 4, 8)]))
         anylst.append(self._all_equal([self._all_squares[i] for i in (2, 4, 6)]))
         if any(anylst):
-            return 'y'
+            return '1'
         return '0'
 
     @staticmethod
-    def _all_equal(ls) -> bool:
+    def _all_equal(ls: list[BaseSquare]) -> bool:
         return (
             ls[0].occupier != '0' and ls[0].occupier == ls[1].occupier == ls[2].occupier
         )
@@ -549,7 +397,10 @@ class TicTacToeBoard(BaseBoard):
 
 class TicTacToeGame(BaseGame):
     def __init__(
-        self, ctx: commands.Context, bot: commands.Bot, opponent: discord.Member
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        bot: commands.Bot,
+        opponent: discord.Member,
     ) -> None:
         super().__init__(
             ctx,
@@ -566,63 +417,42 @@ class TicTacToeGame(BaseGame):
         )
 
 
-class ConnectFourSquare(BaseSquare):
-    pass
-
-
 class ConnectFourBoard(BaseBoard):
     def __init__(self) -> None:
         self.p1_emoji = '🟡'
         self.p2_emoji = '🔴'
         self.no_emoji = '⚫'
         self.length = 7
-        self.square_type = ConnectFourSquare
+        self.square_type = BaseSquare
         self._all_squares: list[BaseSquare] = [
             self.square_type() for _ in range(self.length * 6)
         ]
 
-        self.rows = [self._all_squares[k - 7 : k] for k in range(7, 43, 7)]
-        self.columns = [
-            [l[n] for l in self.rows] for n in range(7)
-        ]  # the columns are actually work correctly with [x][y] indexings
-        self.right_diagonals = [
-            [(0, 2)],
-            [(0, 1)],
-            [(0, 0)],
-            [(1, 0)],
-            [(2, 0)],
-            [(3, 0)],
-        ]
-        self.left_diagonals = [
-            [(0, 3)],
-            [(0, 4)],
-            [(0, 5)],
-            [(1, 5)],
-            [(2, 5)],
-            [(3, 5)],
-        ]
-        for n in range(1, 7):
-            for right_list in self.right_diagonals:
+        BoardRow = list[list[BaseSquare]]
+        self.rows: BoardRow = [self._all_squares[k - 7 : k] for k in range(7, 43, 7)]
+        self.columns: BoardRow = [[row[n] for row in self.rows] for n in range(7)]
+        self.right_diagonals: BoardRow = [[] for _ in range(6)]
+        self.left_diagonals: BoardRow = [[] for _ in range(6)]
+
+        r_diag_starts = ((0, 2), (0, 1), (0, 0), (1, 0), (2, 0), (3, 0))
+        l_diag_starts = ((0, 3), (0, 4), (0, 5), (1, 5), (2, 5), (3, 5))
+        for n in range(7):
+            for k, right_list in enumerate(self.right_diagonals):
                 try:
                     right_list.append(
-                        self.columns[right_list[0][0] + n][right_list[0][1] + n]
+                        self.columns[r_diag_starts[k][0] + n][r_diag_starts[k][1] + n]
                     )
                 except IndexError:
-                    pass
-            for left_list in self.left_diagonals:
+                    continue
+            for k, left_list in enumerate(self.left_diagonals):
                 try:
                     left_list.append(
-                        self.columns[left_list[0][0] + n][left_list[0][1] - n]
+                        self.columns[l_diag_starts[k][0] + n][l_diag_starts[k][1] - n]
                     )
                 except IndexError:
-                    pass
+                    continue
 
-        for diag_list in self.right_diagonals:
-            diag_list[0] = self.columns[diag_list[0][0]][diag_list[0][1]]
-        for diag_list in self.left_diagonals:
-            diag_list[0] = self.columns[diag_list[0][0]][diag_list[0][1]]
-
-    async def to_emojis(self):
+    async def to_emojis(self) -> tuple[str, str]:
         string = str(self).splitlines(keepends=True)
         return ''.join(string[0:4]).replace('1', '🟡').replace('2', '🔴').replace(
             '0', '⚫'
@@ -642,21 +472,24 @@ class ConnectFourBoard(BaseBoard):
         ]
         this_column[0].occupier = value
 
-    async def check_win(self) -> Literal['y', '0']:
+    async def check_win(self) -> Literal['0', '1']:
         for lst in (self.rows, self.columns, self.right_diagonals, self.left_diagonals):
             for some_row in [
                 ''.join(sl) for sl in [[p.occupier for p in l] for l in lst]
             ]:
                 if some_row.find('1111') != -1:
-                    return 'y'
+                    return '1'
                 if some_row.find('2222') != -1:
-                    return 'y'
+                    return '1'
         return '0'
 
 
 class ConnectFourGame(BaseGame):
     def __init__(
-        self, ctx: commands.Context, bot: commands.Bot, opponent: discord.Member
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        bot: commands.Bot,
+        opponent: discord.Member,
     ) -> None:
         super().__init__(
             ctx,
@@ -668,7 +501,7 @@ class ConnectFourGame(BaseGame):
             C.YELLOW,
             C.RED,
             42,
-            None,
+            '',
             30,
         )
 
@@ -677,10 +510,15 @@ class ConnectFourGame(BaseGame):
             f'{C.B}{self._player1.color}{self._player1.symbol}: {self._player1}, '
             f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
         )
-        board1, board2 = await self._board.to_emojis()
+        as_emojis = await self._board.to_emojis()
+        assert isinstance(as_emojis, tuple)
+        board1, board2 = as_emojis
+
         msg1 = await self._ctx.send(board1)
         msg2 = await self._ctx.send(board2)
         self._board_msg = BoardMessage([msg1, msg2], self._board)
+
+        self._board_msg.message = cast(list[discord.Message], self._board_msg)
         for num in NUM_EMOTES[:7]:
             await self._board_msg.message[1].add_reaction(num)
 
@@ -693,8 +531,11 @@ class ConnectFourGame(BaseGame):
 
     async def _get_coord(
         self, this_turn: Player, next_turn: Player
-    ) -> tuple[int, None]:
-        def check(reaction: discord.Reaction, user: discord.User):
+    ) -> tuple[int, int] | tuple[str, None]:
+        def chk(reaction: discord.Reaction, user: discord.User) -> bool:
+            self._board_msg.message = cast(
+                list[discord.Message], self._board_msg.message
+            )
             return (
                 user.id == this_turn.member.id
                 and reaction.message == self._board_msg.message[1]
@@ -705,16 +546,16 @@ class ConnectFourGame(BaseGame):
         while True:
             try:
                 reaction, user = await self._bot.wait_for(
-                    'reaction_add', check=check, timeout=self._wait_time
+                    'reaction_add', check=chk, timeout=self._wait_time
                 )
                 await reaction.remove(user)
 
                 for k, num in enumerate(NUM_EMOTES):
                     if num == str(reaction.emoji):
-                        if not await self._board.is_valid_square(k + 1, 0, None):
+                        if not await self._board.is_valid_square(k + 1, 0, '1'):
                             await self._prompt_msg.occupied(this_turn)
                             continue
-                        return k + 1, None
+                        return k + 1, 0
             except asyncio.TimeoutError:
                 if timeout:
                     await self._prompt_msg.timeout(this_turn, next_turn)
@@ -724,13 +565,9 @@ class ConnectFourGame(BaseGame):
                 continue
 
 
-class ReversiSquare(BaseSquare):
-    pass
-
-
 class ReversiBoard(BaseBoard):
     def __init__(self) -> None:
-        super().__init__('🌑', '⚪', '🟩', 8, ReversiSquare)
+        super().__init__('🌑', '⚪', '🟩', 8, BaseSquare)
         self.rows = [
             [self._all_squares[self.length * y + x] for x in range(8)] for y in range(8)
         ]  # columns work with [x][y] access here too, instead of rows
@@ -739,55 +576,53 @@ class ReversiBoard(BaseBoard):
         self.columns[4][3].occupier = '2'
         self.columns[3][3].occupier = '1'
         self.columns[4][4].occupier = '1'
-        self.right_diagonals: list[list[ReversiSquare]] = [
-            [(0, 5)],
-            [(0, 4)],
-            [(0, 3)],
-            [(0, 2)],
-            [(0, 1)],
-            [(0, 0)],
-            [(1, 0)],
-            [(2, 0)],
-            [(3, 0)],
-            [(4, 0)],
-            [(5, 0)],
-        ]
-        self.left_diagonals: list[list[ReversiSquare]] = [
-            [(0, 2)],
-            [(0, 3)],
-            [(0, 4)],
-            [(0, 5)],
-            [(0, 6)],
-            [(0, 7)],
-            [(1, 7)],
-            [(2, 7)],
-            [(3, 7)],
-            [(4, 7)],
-            [(5, 7)],
-        ]
-        for n in range(1, 8):
-            for right_list in self.right_diagonals:
+        r_diag_starts = (
+            (0, 5),
+            (0, 4),
+            (0, 3),
+            (0, 2),
+            (0, 1),
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (3, 0),
+            (4, 0),
+            (5, 0),
+        )
+        l_diag_starts = (
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (0, 7),
+            (1, 7),
+            (2, 7),
+            (3, 7),
+            (4, 7),
+            (5, 7),
+        )
+        self.right_diagonals: list[list[BaseSquare]] = [[] for _ in range(11)]
+        self.left_diagonals: list[list[BaseSquare]] = [[] for _ in range(11)]
+        for n in range(8):
+            for k, right_list in enumerate(self.right_diagonals):
                 try:
                     right_list.append(
-                        self.columns[right_list[0][0] + n][right_list[0][1] + n]
+                        self.columns[r_diag_starts[k][0] + n][r_diag_starts[k][1] + n]
                     )
                 except IndexError:
                     continue
-            for left_list in self.left_diagonals:
+            for k, left_list in enumerate(self.left_diagonals):
                 try:
-                    if left_list[0][1] - n < 0:
+                    if l_diag_starts[0][1] - n < 0:
                         continue
                     left_list.append(
-                        self.columns[left_list[0][0] + n][left_list[0][1] - n]
+                        self.columns[l_diag_starts[k][0] + n][l_diag_starts[k][1] - n]
                     )
                 except IndexError:
                     continue
-        for lst in self.right_diagonals:
-            lst[0] = self.columns[lst[0][0]][lst[0][1]]
-        for lst in self.left_diagonals:
-            lst[0] = self.columns[lst[0][0]][lst[0][1]]
 
-    async def to_emojis(self) -> str:
+    async def to_emojis(self) -> tuple[str, str, str]:
         string_list = str(self).splitlines(keepends=True)
 
         for k, string in enumerate(string_list.copy()):
@@ -803,7 +638,7 @@ class ReversiBoard(BaseBoard):
         part3 = ''.join(string_list[6:])
         return (part1, part2, part3 + '\n🟦 ' + ''.join(NUM_EMOTES[0:8]))
 
-    async def is_valid_square(self, x: int, y: int, value: str) -> bool:
+    async def is_valid_square(self, x: int, y: int, value: Literal['1', '2']) -> bool:
         square = self._all_squares[self.length * y - self.length + x - 1]
         if square.occupier != '0':
             return False
@@ -816,7 +651,8 @@ class ReversiBoard(BaseBoard):
             if square in diag:
                 ldiag = diag
 
-        has_square, spans = [], []
+        has_square: list[list[BaseSquare]] = []
+        spans: list[tuple[int, int]] = []
         if span := await self._find_across(self.columns[x - 1], value):
             has_square.append(self.columns[x - 1])
             spans.append(span)
@@ -841,13 +677,15 @@ class ReversiBoard(BaseBoard):
         return None
 
     @staticmethod
-    async def _find_across(lst: list, char: str) -> tuple:
+    async def _find_across(
+        lst: list[BaseSquare], char: str
+    ) -> tuple[int, int] | tuple[()]:
         string = ''.join([square.occupier for square in lst])
         try:
             if char == '1':
-                return re.search(r'1[12]*2[12]*1', string).span()
+                return re.search(r'1[12]*2[12]*1', string).span()  # type: ignore
             else:
-                return re.search(r'2[12]*1[12]*2', string).span()
+                return re.search(r'2[12]*1[12]*2', string).span()  # type: ignore
         except AttributeError:
             return ()
 
@@ -865,7 +703,7 @@ class ReversiBoard(BaseBoard):
 class ReversiGame(BaseGame):
     def __init__(
         self,
-        ctx: commands.Context,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         bot: commands.Bot,
         opponent: discord.Member,
         time: int = 10,
@@ -895,7 +733,9 @@ class ReversiGame(BaseGame):
             f'{self._player1.color}{self._player1.symbol}: {self._player1}, '
             f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
         )
-        boart1, board2, board3 = await self._board.to_emojis()
+        boart1, board2, board3 = cast(
+            tuple[str, str, str], await self._board.to_emojis()
+        )
         msg1 = await self._ctx.send(boart1)
         msg2 = await self._ctx.send(board2)
         msg3 = await self._ctx.send(board3)
@@ -908,6 +748,7 @@ class ReversiGame(BaseGame):
         return False
 
     async def _iter_begin(self, this_turn: Player, next_turn: Player) -> bool:
+        assert self._start_time is not None
         delta: datetime.timedelta = datetime.datetime.now() - self._start_time
         if delta.seconds / 60 > self._time:
             await self._check_board_win(
@@ -916,6 +757,7 @@ class ReversiGame(BaseGame):
             return True
 
         await self._prompt_msg.update(this_turn)
+        return False
 
     async def _loop_end(self, this_turn: Player, next_turn: Player) -> None:
         await self._check_board_win(this_turn, next_turn)
@@ -931,7 +773,7 @@ class ReversiGame(BaseGame):
         if not force:
             return False
 
-        black, white = await self._board.check_win()
+        black, white = cast(tuple[int, int], await self._board.check_win())
         if black == white:
             await self._prompt_msg.winner(
                 this_turn,
@@ -962,10 +804,10 @@ class WeiqiSquare(BaseSquare):
         super().__init__()
         self.x = x
         self.y = y
-        self.up = None
-        self.down = None
-        self.right = None
-        self.left = None
+        self.up: Optional[WeiqiSquare] = None
+        self.down: Optional[WeiqiSquare] = None
+        self.right: Optional[WeiqiSquare] = None
+        self.left: Optional[WeiqiSquare] = None
 
     @property
     def neighbors(self) -> list[WeiqiSquare]:
@@ -973,16 +815,16 @@ class WeiqiSquare(BaseSquare):
             sq for sq in [self.up, self.down, self.right, self.left] if sq is not None
         ]
 
-    async def liberty(self) -> tuple[bool, list[WeiqiSquare]]:
+    async def liberty(self) -> tuple[bool, set[WeiqiSquare]]:
         """checks this square's liberty
 
         returns a list of [liberty: bool, group: set[Square]]. liberty is if
         the group has liberty. group is a set of all squares of the connected group.
         """
-        group = {self}
+        group: set[WeiqiSquare] = {self}
         return await self._liberty2(group), group
 
-    async def _liberty2(self, group: set) -> bool:
+    async def _liberty2(self, group: set[WeiqiSquare]) -> bool:
         # modifies gp
         print('lib2')
         if self.occupier == '0':
@@ -1000,8 +842,8 @@ class WeiqiSquare(BaseSquare):
     async def empty_group(self) -> tuple[Literal['0', '1', '2'], set[WeiqiSquare]]:
         """gets a set of all neighboring squares if its occ is 0"""
         print('call')
-        emptygroup = {self}
-        surrounded = set(self.neighbors)
+        emptygroup: set[WeiqiSquare] = {self}
+        surrounded: set[WeiqiSquare] = set(self.neighbors)
         await self._group2(emptygroup, surrounded)
         bcount = wcount = 0
         for sq in surrounded.copy():
@@ -1017,7 +859,7 @@ class WeiqiSquare(BaseSquare):
             return '2', emptygroup
         return '0', emptygroup
 
-    async def _group2(self, gp: set, sr: set) -> bool:
+    async def _group2(self, gp: set[WeiqiSquare], sr: set[WeiqiSquare]) -> None:
         # modifies gp and sr
         for sq in self.neighbors:
             if sq.occupier == '0' and sq not in gp:
@@ -1034,10 +876,10 @@ class WeiqiBoard(BaseBoard):
         self.length = 19
         self.square_type = WeiqiSquare
 
-        self._unliberated = set()
-        self._numof_unlib = 0
-        self._b_prisoners = 0
-        self._w_prisoners = 0
+        self._unliberated: set[WeiqiSquare] = set()
+        self._numof_unlib: int = 0
+        self._b_prisoners: int = 0
+        self._w_prisoners: int = 0
 
         self._rows = [
             [self.square_type(x, y) for x in range(self.length)]
@@ -1117,7 +959,7 @@ class WeiqiBoard(BaseBoard):
 
     async def _all_emptygroups(self) -> tuple[int, int]:
         print('all empty call')
-        checked = set()
+        checked: set[WeiqiSquare] = set()
         black_captured_groups = 0
         white_captured_groups = 0
         for column in self._columns:
@@ -1156,7 +998,7 @@ class WeiqiBoard(BaseBoard):
 class WeiqiGame(BaseGame):
     def __init__(
         self,
-        ctx: commands.Context,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         bot: commands.Bot,
         opponent: discord.Member,
         time: int = 20,
@@ -1186,7 +1028,10 @@ class WeiqiGame(BaseGame):
             f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
         )
         self._board_msg = BoardMessage(
-            await self._ctx.send(embeds=await self._board.to_emojis()), self._board
+            await self._ctx.send(
+                embeds=cast(list[discord.Embed], await self._board.to_emojis())
+            ),
+            self._board,
         )
         self._prompt_msg = PromptMessage(
             await self._ctx.send(
@@ -1196,6 +1041,7 @@ class WeiqiGame(BaseGame):
         return False
 
     async def _iter_begin(self, this_turn: Player, next_turn: Player) -> bool:
+        assert self._start_time is not None
         delta: datetime.timedelta = datetime.datetime.now() - self._start_time
         if delta.seconds / 60 > self._time:
             await self._check_board_win(
@@ -1204,6 +1050,7 @@ class WeiqiGame(BaseGame):
             return True
 
         await self._prompt_msg.update(this_turn)
+        return False
 
     async def _check_board_win(
         self,
@@ -1216,7 +1063,7 @@ class WeiqiGame(BaseGame):
         if not force:
             return False
 
-        black, white = await self._board.check_win()
+        black, white = cast(tuple[int, int], await self._board.check_win())
         await self._board_msg.update()
         if black == white:
             await self._prompt_msg.winner(
@@ -1243,13 +1090,9 @@ class WeiqiGame(BaseGame):
         return True
 
 
-class BattleshipSquare(BaseSquare):
-    pass
-
-
 class BattleshipBoard(BaseBoard):
     def __init__(self, player: Player) -> None:
-        super().__init__('⬜', '\U0001f7e9', '🟦', 10, BattleshipSquare)
+        super().__init__('⬜', '\U0001f7e9', '🟦', 10)
         self.player = player
         self.hit_ship = False
         self.sank_ship = False
@@ -1260,7 +1103,7 @@ class BattleshipBoard(BaseBoard):
         ]
         self.columns = [[r[n] for r in self.rows] for n in range(10)]
 
-        self.old_ships: list[BattleshipSquare] = []
+        self.old_ships: list[BaseSquare] = []
         self.ships = [
             AllPoints(coords)
             for coords in (
@@ -1291,11 +1134,13 @@ class BattleshipBoard(BaseBoard):
         waves_string += '\n🟦 ' + ''.join(NUM_EMOTES)
         return waves_string
 
-    async def get_square(self, x: int, y: int) -> BattleshipSquare:
+    async def get_square(self, x: int | float, y: int | float) -> BaseSquare:
         """getter only for use with old_squares"""
         return self._all_squares[self.length * int(y) - self.length + int(x) - 1]
 
-    async def initial_set_square(self, x: int, y: int, value: Literal['1', '2']):
+    async def initial_set_square(
+        self, x: int | float, y: int | float, value: Literal['0', '1', '2']
+    ):
         self._all_squares[
             self.length * int(y) - self.length + int(x) - 1
         ].occupier = value
@@ -1307,11 +1152,10 @@ class BattleshipBoard(BaseBoard):
         set_square = self._all_squares[self.length * y - self.length + x - 1]
         set_square.occupier = '📌'
         if set_square in self.old_ships:
-            print('reached never')
             set_square.occupier = '💥'
             self.hit_ship = True
         for k, ship in enumerate(self.ships):
-            this_squares: list[BattleshipSquare] = [
+            this_squares: list[BaseSquare] = [
                 self._all_squares[self.length * y - self.length + x - 1]
                 for x, y in [(int(point.x), int(point.y)) for point in ship.allpoints]
             ]
@@ -1322,12 +1166,12 @@ class BattleshipBoard(BaseBoard):
                     sq.occupier = '🔥'
                 break
 
-    async def check_win(self) -> int:
+    async def check_win(self) -> tuple[int, int]:
         remaining = 0
         for ship in self.ships:
             remaining += len(ship.allpoints)
         print('bd return remaining', remaining)
-        return remaining
+        return remaining, 0
 
     async def reveal_ships(self) -> None:
         for square in self.old_ships:
@@ -1335,12 +1179,18 @@ class BattleshipBoard(BaseBoard):
                 square.occupier = '1'
 
 
+class Timeout1(asyncio.TimeoutError):
+    pass
+
+
+class Timeout2(asyncio.TimeoutError):
+    pass
+
+
 class DirectionsButtonView(ui.View):
     SHIP_NAMES = ('Carrier', 'Battleship', 'Cruiser', 'Submarine', 'Destroyer')
 
-    def __init__(
-        self, superview: EmphemeralBattleshipStartView, board: BattleshipBoard
-    ):
+    def __init__(self, superview: EphemeralBattleshipStartView, board: BattleshipBoard):
         super().__init__(timeout=20)
         self.board = board
         self.superview = superview
@@ -1360,23 +1210,25 @@ class DirectionsButtonView(ui.View):
         ):
             self.add_item(DirectionButton(k, value))
 
-    async def wait(self) -> bool:
+    async def wait(self) -> bool | NoReturn:
         res = await super().wait()
         if res:
+            print('waiting', self.board.player.member)
             if self.board.player.member.id == self.superview.player1.member.id:
-                raise asyncio.TimeoutError
-            raise TimeoutError
+                raise Timeout1
+            raise Timeout2
         return res
 
     async def handle_button_interaction(
         self, interaction: discord.Interaction, button: DirectionButton
     ):
-        Point = namedtuple('Point', ['x', 'y'])
-        move_point = None
-        rotate = None
+        print('handling', self.board, interaction, button, button.direction)
+        move_point: Optional[Point | tuple[Point, float]] = None
         match button.direction:
             case 'up':
+                print('up up up')
                 move_point = Point(0, 1)
+                print(move_point)
             case 'down':
                 move_point = Point(0, -1)
             case 'left':
@@ -1384,50 +1236,60 @@ class DirectionsButtonView(ui.View):
             case 'right':
                 move_point = Point(1, 0)
             case 'rotate':
+                print('spin spin spin')
                 ship = self.board.ships[self._current_ship].allpoints
-                center = ship[len(ship) // 2]
-                rotate = (center, radians(90))
-        if button.direction == 'ok':
-            self.board.old_ships.extend(
-                [
-                    await self.board.get_square(point.x, point.y)
-                    for point in self.board.ships[self._current_ship].allpoints
-                ]
-            )
-            self._current_ship += 1
-            for square in self.board.old_ships:
-                square.occupier = '1'
-            if self._current_ship == 5:
-                self.clear_items()
-                await interaction.response.edit_message(
-                    content=f'{C.B}{C.BLUE}All done! Now just wait for your opponent.{C.E}',
-                    embed=discord.Embed(description=await self.board.to_emojis()),
-                    view=self,
+                move_point = (ship[len(ship) // 2], radians(90))
+                print(ship, move_point, move_point[0].x, move_point[0].y)
+            case _:  # case 'ok'
+                self.board.old_ships.extend(
+                    [
+                        await self.board.get_square(point.x, point.y)
+                        for point in self.board.ships[self._current_ship].allpoints
+                    ]
                 )
-                self.stop()
-            else:
-                await self.board_add()
-                await self.check_button_usable()
-                await interaction.response.edit_message(
-                    content=f'{C.B}{C.BOLD_GRAY_H_INDIGO}{self.__class__.SHIP_NAMES[self._current_ship]}{C.E}',
-                    embed=discord.Embed(description=await self.board.to_emojis()),
-                    view=self,
-                )
+                self._current_ship += 1
+                for square in self.board.old_ships:
+                    square.occupier = '1'
+                if self._current_ship == 5:
+                    self.clear_items()
+                    await interaction.response.edit_message(
+                        content=f'{C.B}{C.BLUE}All done! Now just wait for your opponent.{C.E}',
+                        embed=discord.Embed(description=await self.board.to_emojis()),
+                        view=self,
+                    )
+                    self.stop()
+                else:
+                    await self.board_add()
+                    await self.check_button_usable()
+                    print('after usa')
+                    print(interaction)
+                    await interaction.response.edit_message(
+                        content=f'{C.B}{C.BOLD_GRAY_H_INDIGO}{self.__class__.SHIP_NAMES[self._current_ship]}{C.E}',
+                        embed=discord.Embed(description=await self.board.to_emojis()),
+                        view=self,
+                    )
+                return
+
+        print('fig mv o rt', move_point)
+
+        await self.board_remove()
+        for square in self.board.old_ships:
+            square.occupier = '1'
+        if not isinstance(move_point, tuple):
+            print('mv pt mving')
+            self.board.ships[self._current_ship].translate_all(move_point)
         else:
-            await self.board_remove()
-            for square in self.board.old_ships:
-                square.occupier = '1'
-            if move_point:
-                self.board.ships[self._current_ship].translate_all(move_point)
-            elif rotate:
-                self.board.ships[self._current_ship].rotate_all(rotate)
-            await self.board_add()
-            await self.check_button_usable()
-            await interaction.response.edit_message(
-                embed=discord.Embed(description=await self.board.to_emojis()), view=self
-            )
+            print('rt pt rting')
+            self.board.ships[self._current_ship].rotate_all(move_point)
+        await self.board_add()
+        await self.check_button_usable()
+        print('\n', self.board, '\n')
+        await interaction.response.edit_message(
+            embed=discord.Embed(description=await self.board.to_emojis()), view=self
+        )
 
     async def board_add(self):
+        print('bd add')
         for x, y in [
             (point.x, point.y)
             for point in self.board.ships[self._current_ship].allpoints
@@ -1435,6 +1297,7 @@ class DirectionsButtonView(ui.View):
             await self.board.initial_set_square(x, y, '2')
 
     async def board_remove(self):
+        print('bd rm')
         for x, y in [
             (point.x, point.y)
             for point in self.board.ships[self._current_ship].allpoints
@@ -1442,16 +1305,18 @@ class DirectionsButtonView(ui.View):
             await self.board.initial_set_square(x, y, '0')
 
     async def check_button_usable(self) -> None:
+        print('chk btn usa')
         this_ship = [
             await self.board.get_square(point.x, point.y)
             for point in self.board.ships[self._current_ship].allpoints
         ]
+        print('this ship', this_ship)
         for square in self.board.old_ships:
             if square in this_ship:
-                self.children[2].disabled = True
+                self.children[2].disabled = True  # type: ignore
                 break
         else:
-            self.children[2].disabled = False
+            self.children[2].disabled = False  # type: ignore
 
         edges = [
             self.board.columns[0],
@@ -1470,11 +1335,12 @@ class DirectionsButtonView(ui.View):
             )
         for edge in edges:
             if all([point in edge for point in this_ship]):
-                self.children[0].disabled = True
+                self.children[0].disabled = True  # type: ignore
                 break
         else:
-            self.children[0].disabled = False
+            self.children[0].disabled = False  # type: ignore
 
+        print('bziter')
         for k, edge in zip(
             (1, 3, 4, 5),
             (
@@ -1484,13 +1350,14 @@ class DirectionsButtonView(ui.View):
                 self.board.columns[-1],
             ),
         ):
+            print('ziter', k, edge)
             if any([point in edge for point in this_ship]):
-                self.children[k].disabled = True
+                self.children[k].disabled = True  # type: ignore
             else:
-                self.children[k].disabled = False
+                self.children[k].disabled = False  # type: ignore
 
 
-class DirectionButton(ui.Button):
+class DirectionButton(ui.Button[DirectionsButtonView]):
     DIRECTIONS = {
         '\U0001f501': 'rotate',
         '\U0001f53c': 'up',
@@ -1504,22 +1371,26 @@ class DirectionButton(ui.Button):
         super().__init__(style=discord.ButtonStyle.primary, emoji=emote, row=row)
         self.direction = self.__class__.DIRECTIONS[emote]
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert self.view is not None
+        print('pressed')
         await self.view.handle_button_interaction(interaction, self)
 
 
-class EmphemeralBattleshipStartView(ui.View):
+class EphemeralBattleshipStartView(ui.View):
     def __init__(self, bot: commands.Bot, p1: Player, p2: Player):
         super().__init__(timeout=20)
         self.bot = bot
         self.player1 = p1
         self.player2 = p2
-        self.message: discord.Message = None
+        self.message: Optional[discord.Message] = None
 
-        self.subview1: DirectionsButtonView = None
-        self.subview2: DirectionsButtonView = None
-        self.interaction1: discord.Interaction = None
-        self.interaction2: discord.Interaction = None
+        self.subview1: Optional[DirectionsButtonView] = None
+        self.subview2: Optional[DirectionsButtonView] = None
+        self.interaction1: Optional[discord.Interaction] = None
+        self.interaction2: Optional[discord.Interaction] = None
+
+        self.children: list[discord.Button]  # type: ignore
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id not in (self.player1.member.id, self.player2.member.id):
@@ -1537,11 +1408,16 @@ class EmphemeralBattleshipStartView(ui.View):
         return True
 
     @ui.button(label='start')
-    async def press(self, interaction: discord.Interaction, button: ui.Button):
-        this_board = BattleshipBoard(Player(interaction.user))
+    async def press(
+        self,
+        interaction: discord.Interaction,
+        button: ui.Button[EphemeralBattleshipStartView],
+    ):
+        this_board = BattleshipBoard(Player(cast(discord.Member, interaction.user)))
         for x, y in [(point.x, point.y) for point in this_board.ships[0].allpoints]:
             await this_board.initial_set_square(x, y, '2')
         buttons_view = DirectionsButtonView(self, this_board)
+        assert self.message is not None
         if interaction.user.id == self.player1.member.id:
             self.subview1 = buttons_view
             self.interaction1 = interaction
@@ -1570,6 +1446,9 @@ class SingleBattleshipBoardAdapter(BaseBoard):
         self.hit = False
         self.sank = False
 
+        self.red_hex = discord.Colour.from_rgb(255, 0, 0)
+        self.blue_hex = discord.Colour.from_rgb(51, 153, 255)
+
     async def set_square(self, x: int, y: int, value: Literal['1', '2']) -> None:
         if value == '1':
             await self._board2.set_square(x, y, value)
@@ -1578,7 +1457,7 @@ class SingleBattleshipBoardAdapter(BaseBoard):
             await self._board1.set_square(x, y, value)
             self.hit, self.sank = self._board1.hit_ship, self._board1.sank_ship
 
-    async def is_valid_square(self, x: int, y: int, value: str) -> bool:
+    async def is_valid_square(self, x: int, y: int, value: Literal['1', '2']) -> bool:
         if value == '1':
             return await self._board2.is_valid_square(x, y, value)
         return await self._board1.is_valid_square(x, y, value)
@@ -1587,38 +1466,46 @@ class SingleBattleshipBoardAdapter(BaseBoard):
         if self.this_turn == '1':
             title = "Blue's Ocean"
             desc = await self._board2.to_emojis()
-            color_hex = (51, 153, 255)
+            color = self.blue_hex
         else:
             title = "Red's Ocean"
             desc = await self._board1.to_emojis()
-            color_hex = (255, 0, 0)
-        return [
-            discord.Embed(
-                title=title,
-                description=desc,
-                colour=discord.Colour.from_rgb(*color_hex),
-            )
-        ]
+            color = self.red_hex
+        return [discord.Embed(title=title, description=desc, colour=color)]
 
     async def check_win(self) -> tuple[int, int]:
-        return await self._board1.check_win(), await self._board2.check_win()
+        num1, num2 = await self._board1.check_win(), await self._board2.check_win()
+        return num1[0], num2[0]
 
     async def reveal_ships(self) -> list[discord.Embed]:
+        await self._board1.reveal_ships()
+        await self._board2.reveal_ships()
         return [
-            discord.Embed(description=await self._board1.reveal_ships()),
-            discord.Embed(description=await self._board2.reveal_ships()),
+            discord.Embed(
+                title="Red's Ocean",
+                description=await self._board1.to_emojis(),
+                colour=self.red_hex,
+            ),
+            discord.Embed(
+                title="Blue's Ocean",
+                description=await self._board2.to_emojis(),
+                colour=self.blue_hex,
+            ),
         ]
 
 
 class BattleshipGame(BaseGame):
     def __init__(
-        self, ctx: commands.Context, bot: commands.Bot, opponent: discord.Member
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        bot: commands.Bot,
+        opponent: discord.Member,
     ) -> None:
         super().__init__(
             ctx,
             bot,
             opponent,
-            object,
+            object,  # type: ignore
             'Red',
             'Blue',
             C.RED,
@@ -1629,7 +1516,7 @@ class BattleshipGame(BaseGame):
         )
 
     async def _loop_begin(self) -> bool:
-        start_view = EmphemeralBattleshipStartView(
+        start_view = EphemeralBattleshipStartView(
             self._bot, self._player1, self._player2
         )
         start_message = await self._ctx.send(
@@ -1646,23 +1533,24 @@ class BattleshipGame(BaseGame):
             start_message = await start_message.edit(content=errmsg, view=start_view)
             return True
 
-        board1, board2 = start_view.subview1.board, start_view.subview2.board
+        assert view1 and view2
+        board1, board2 = view1.board, view2.board
         task = asyncio.gather(view1.wait(), view2.wait())
         try:
             await task
-        except asyncio.TimeoutError:
+        except Timeout1:
             cancel_info = (
-                start_view.interaction2,
+                cast(discord.Interaction, start_view.interaction2),
                 view2,
-                start_view.interaction1,
+                cast(discord.Interaction, start_view.interaction1),
                 view1,
                 self._player1,
             )
-        except TimeoutError:
+        except Timeout2:
             cancel_info = (
-                start_view.interaction1,
+                cast(discord.Interaction, start_view.interaction1),
                 view1,
-                start_view.interaction2,
+                cast(discord.Interaction, start_view.interaction2),
                 view2,
                 self._player2,
             )
@@ -1686,8 +1574,8 @@ class BattleshipGame(BaseGame):
             return False
 
         task.cancel()
-        await self.cancel_view(view1)
-        await self.cancel_view(view2)
+        await self.cancel_buttons_view(view1)
+        await self.cancel_buttons_view(view2)
         await cancel_info[0].edit_original_message(
             content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=cancel_info[1]
         )
@@ -1703,6 +1591,7 @@ class BattleshipGame(BaseGame):
         self._board.this_turn = this_turn.number
         await self._board_msg.update()
         await super()._iter_begin(this_turn, next_turn)
+        return False
 
     async def _iter_end(self, this_turn: Player, next_turn: Player) -> bool:
         if self._flush:
@@ -1712,9 +1601,9 @@ class BattleshipGame(BaseGame):
         self._board: SingleBattleshipBoardAdapter
         if self._board.sank:
             await self._ctx.send(
-                f'{C.B}{C.GREEN}Hit! and a ship has sunken!{C.E}', delete_after=2
+                f'{C.B}{C.GREEN}Hit! and a ship has sunken!{C.E}', delete_after=3
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
         elif self._board.hit:
             await self._ctx.send(f'{C.B}{C.GREEN}Hit!{C.E}', delete_after=2)
             await asyncio.sleep(2)
@@ -1723,23 +1612,24 @@ class BattleshipGame(BaseGame):
             await asyncio.sleep(2)
 
         if await self._check_board_win(this_turn, next_turn):
-            await self._board_msg.message.edit(embeds=await self._board.reveal_ships())
+            await self._board_msg.update_message(await self._board.reveal_ships())
             return True
         return False
 
     async def _timeout(self, this_turn: Player, next_turn: Player) -> None:
-        await self._board_msg.message.edit(embeds=await self._board.reveal_ships())
+        await self._board_msg.update_message(await self._board.reveal_ships())
         await super()._timeout(this_turn, next_turn)
 
     async def _end(self, this_turn: Player, next_turn: Player) -> None:
-        await self._board_msg.message.edit(embeds=await self._board.reveal_ships())
+        print('end call')
+        await self._board_msg.update_message(await self._board.reveal_ships())
         await super()._end(this_turn, next_turn)
 
     async def _check_board_win(
         self, this_turn: Player, next_turn: Player, *, force: bool = False
     ) -> bool:
         red, blue = await self._board.check_win()
-        print('checking', red, blue)
+        print('checking', red, blue, force)
         if blue == 0:
             await self.red_winner((17 - red, 17 - blue))
             return True
@@ -1774,144 +1664,233 @@ class BattleshipGame(BaseGame):
         await self._prompt_msg.winner(self._player2, points_ratio=ratio)
 
     @staticmethod
-    async def cancel_view(view: ui.View):
+    async def cancel_buttons_view(view: ui.View):
         for child in view.children:
-            child.disabled = True
+            print('cancel btn view disable', child)
+            child.disabled = True  # type: ignore
         view.stop()
 
-    async def cancel_messages(self, start_view, view1, view2) -> str:
+    async def cancel_messages(
+        self,
+        start_view: EphemeralBattleshipStartView,
+        view1: DirectionsButtonView | None,
+        view2: DirectionsButtonView | None,
+    ) -> str:
         if not view1 and not view2:
-            errmsg = f'{C.B}{C.RED}Timed out.{C.E}'
-        elif not view1:
-            await self.cancel_view(view2)
-            start_view.interaction2 = (
+            return f'{C.B}{C.RED}Timed out.{C.E}'
+        if not view1:
+            assert view2 and start_view.interaction2
+            await self.cancel_buttons_view(view2)
+            start_view.interaction2.message = (
                 await start_view.interaction2.edit_original_message(
                     content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=view2
                 )
             )
-            errmsg = f'{C.B}{C.RED}{self._player1} timed out.{C.E}'
+            return f'{C.B}{C.RED}{self._player1} timed out.{C.E}'
         else:
-            await self.cancel_view(view1)
-            start_view.interaction1 = (
+            assert view1 and start_view.interaction1
+            await self.cancel_buttons_view(view1)
+            start_view.interaction1.message = (
                 await start_view.interaction1.edit_original_message(
                     content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=view1
                 )
             )
-            errmsg = f'{C.B}{C.RED}{self._player2} timed out.{C.E}'
-        return errmsg
+            return f'{C.B}{C.RED}{self._player2} timed out.{C.E}'
+
+
+class InteractionContextAdapter:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.channel = cast(discord.TextChannel, interaction.channel)
+        self.send = self.channel.send
+
+    async def reply(self, content: str, **kwargs: Any) -> discord.InteractionMessage:
+        await self.interaction.response.send_message(content, **kwargs)
+        self.interaction.message
+        return await self.interaction.original_message()
 
 
 class GameFeatures(commands.GroupCog, name='play'):
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Vesuvius) -> None:
         self.bot = bot
-        self.ingame: list[discord.Member] = []
+        self.ingame: list[int] = []
         super().__init__()
 
     @commands.command(name='ingames')
-    @commands.cooldown(rate=1, per=300, type=commands.BucketType.guild)
+    @commands.dynamic_cooldown(owner_bypass(180), commands.BucketType.user)
     @commands.guild_only()
-    async def ingames(self, ctx: commands.Context, clear: bool = False):
-        await ctx.send(f'```py\n{[member.display_name for member in self.ingame]}```')
-        if clear:
-            self.ingame = []
+    async def ingames(self, ctx: commands.Context[Vesuvius], clear: str = ''):
+        await ctx.send(f'```py\n{self.ingame}```')
+        if clear == 'clear':
+            self.ingame.clear()
             await ctx.send(f'{C.B}{C.GREEN}cleared!{C.E}')
 
-    @app_commands.command(name='tic-tac-toe')
-    async def tictactoe(self, ctx: commands.Context, opponent: discord.Member):
+    @commands.hybrid_command(name='tic-tac-toe')
+    async def tictactoe(
+        self,
+        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        opponent: discord.Member,
+    ):
+        if isinstance(ctx_or_inter, discord.Interaction):
+            ctx = InteractionContextAdapter(ctx_or_inter)
+        else:
+            ctx = ctx_or_inter
+
         if await self.wait_confirm(ctx, opponent, 'Tic-Tac-Toe'):
             return
+
         game = TicTacToeGame(ctx, self.bot, opponent)
         await game.start()
+
+        assert game.winner and game.loser
         await self.done_playing('tictactoe', game.winner, game.loser, game.tie)
 
-    @app_commands.command(name='connect-four')
-    async def connectfour(self, ctx: commands.Context, opponent: discord.Member):
+    @commands.hybrid_command(name='connect-four')
+    async def connectfour(
+        self,
+        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        opponent: discord.Member,
+    ):
+        if isinstance(ctx_or_inter, discord.Interaction):
+            ctx = InteractionContextAdapter(ctx_or_inter)
+        else:
+            ctx = ctx_or_inter
+
         if await self.wait_confirm(ctx, opponent, 'Connect-Four'):
             return
+
         game = ConnectFourGame(ctx, self.bot, opponent)
         await game.start()
+
+        assert game.winner and game.loser
         await self.done_playing('connectfour', game.winner, game.loser, game.tie)
 
-    @app_commands.command(name='reversi')
-    async def reversi(self, ctx: commands.Context, opponent: discord.Member):
+    @commands.hybrid_command(name='reversi')
+    async def reversi(
+        self,
+        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        opponent: discord.Member,
+    ):
+        if isinstance(ctx_or_inter, discord.Interaction):
+            ctx = InteractionContextAdapter(ctx_or_inter)
+        else:
+            ctx = ctx_or_inter
+
         if await self.wait_confirm(ctx, opponent, 'Reversi'):
             return
+
         game = ReversiGame(ctx, self.bot, opponent)
         await game.start()
+
+        assert game.winner and game.loser
         await self.done_playing('reversi', game.winner, game.loser, game.tie)
 
-    @app_commands.command(name='weiqi')
-    async def weiqi(self, ctx: commands.Context, opponent: discord.Member):
+    @commands.hybrid_command(name='weiqi')
+    async def weiqi(
+        self,
+        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        opponent: discord.Member,
+    ):
+        if isinstance(ctx_or_inter, discord.Interaction):
+            ctx = InteractionContextAdapter(ctx_or_inter)
+        else:
+            ctx = ctx_or_inter
+
         if await self.wait_confirm(ctx, opponent, 'Weiqi'):
             return
+
         game = WeiqiGame(ctx, self.bot, opponent)
         await game.start()
+
+        assert game.winner and game.loser
         await self.done_playing('weiqi', game.winner, game.loser, game.tie)
 
-    @app_commands.command(name='battleship')
-    async def battleship(self, ctx: commands.Context, opponent: discord.Member):
+    @commands.hybrid_command(name='battleship')
+    async def battleship(
+        self,
+        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        opponent: discord.Member,
+    ):
+        if isinstance(ctx_or_inter, discord.Interaction):
+            ctx = InteractionContextAdapter(ctx_or_inter)
+        else:
+            ctx = ctx_or_inter
+
         if await self.wait_confirm(ctx, opponent, 'Battleship'):
             return
+
         game = BattleshipGame(ctx, self.bot, opponent)
         await game.start()
+
+        assert game.winner and game.loser
         await self.done_playing('battleship', game.winner, game.loser, game.tie)
 
     async def wait_confirm(
-        self, octx: commands.Context, opp: discord.guild.Member, game: str
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        opp: discord.Member,
+        game: str,
     ) -> int:
         """wait for confirmation that the opp wants to play game"""
-        if octx.author in self.ingame:
-            await octx.send(f'{C.B}{C.RED}you are already in another game.{C.E}')
+        if ctx.author.id in self.ingame:
+            await ctx.send(f'{C.B}{C.RED}you are already in another game.{C.E}')
             return 1
 
-        if opp in self.ingame:
-            await octx.send(
+        if opp.id in self.ingame:
+            await ctx.send(
                 f'{C.B}{C.RED}{opp.display_name} is already in another game. '
                 f'wait for it to finish or try another person!{C.E}'
             )
             return 1
 
-        if opp == octx.author:
-            await octx.send(f'{C.B}{C.RED}you cannot challenge yourself.{C.E}')
+        if opp.id == ctx.author.id:
+            await ctx.send(f'{C.B}{C.RED}you cannot challenge yourself.{C.E}')
             return 1
 
-        if opp == self.bot.user:
-            await octx.send(f'{C.B}{C.RED}no.{C.E}')
+        if opp.id == cast(discord.User, self.bot.user).id:
+            await ctx.send(f'{C.B}{C.RED}no.{C.E}')
             return 1
 
-        self.ingame.append(octx.author)
-        inv = await octx.send(
-            f'{octx.message.author.display_name} has challenged {opp.display_name} '
-            f'to a match of {game.title()}! {opp.mention}, do you accept? '
+        self.ingame.append(ctx.author.id)
+        invitation = await ctx.reply(
+            f'{ctx.author.display_name} has challenged {opp.display_name} '
+            f'to a match of {game}! {opp.mention}, do you accept? '
             '(react with :white_check_mark: or :negative_squared_cross_mark:)'
         )
-        await inv.add_reaction('✅')
-        await inv.add_reaction('❎')
+        await invitation.add_reaction('✅')
+        await invitation.add_reaction('❎')
 
-        def chk(r, u):
-            return u == opp and str(r.emoji) in '✅❎'
+        def chk(r: discord.Reaction, u: discord.User):
+            return (
+                u.id == opp.id
+                and str(r.emoji) in '✅❎'
+                and r.message.id == invitation.id
+            )
 
         reaction = ''
         status = ''
         try:
-            reaction, user = await self.bot.wait_for(
-                'reaction_add', check=chk, timeout=30
-            )
+            reaction, _ = await self.bot.wait_for('reaction_add', check=chk, timeout=30)
         except asyncio.TimeoutError:
-            await octx.send(
+            await ctx.send(
                 f'{C.B}{C.RED}command timed out. it seems that {opp.display_name} '
                 f'does not want to play rn. try someone else!{C.E}'
             )
-            self.ingame.remove(octx.author)
+            self.ingame.remove(ctx.author.id)
             status = 'ignored'
         if reaction:
             if str(reaction.emoji) == '❎':
-                await inv.reply(f'{opp.display_name} did not accept the challenge.')
-                self.ingame.remove(octx.author)
+                await invitation.reply(
+                    f'{opp.display_name} did not accept the challenge.'
+                )
+                self.ingame.remove(ctx.author.id)
                 status = 'rejected'
             elif str(reaction.emoji) == '✅':
-                await inv.reply(f'{opp.display_name} has accepted the challenge!')
-                self.ingame.append(opp)
+                await invitation.reply(
+                    f'{opp.display_name} has accepted the challenge!'
+                )
+                self.ingame.append(opp.id)
                 status = 'accepted'
         now = datetime.datetime.now().strftime("%m/%d, %H:%M:%S")
 
@@ -1922,20 +1901,25 @@ class GameFeatures(commands.GroupCog, name='play'):
 
         async with aopen(self.bot.files['game_log'], 'a') as gl:
             await gl.write(
-                f'{now} | {octx.author.display_name}{game:>16} {opp.display_name:>17},{status:>18}\n'
+                f'{now} | {ctx.author.display_name}{game:>16} {opp.display_name:>17},{status:>18}\n'
             )
         if status in {'ignored', 'rejected'}:
             return 1
         return 0
 
     async def done_playing(
-        self, game: str, p1: discord.Member, p2: discord.Member, tie=False
+        self,
+        game: str,
+        p1: discord.Member | discord.User,
+        p2: discord.Member | discord.User,
+        tie: bool = False,
     ):
-        self.ingame.remove(p1)
-        self.ingame.remove(p2)
+        print('done', p1, p2)
+        self.ingame.remove(p1.id)
+        self.ingame.remove(p2.id)
         await self.bot.database.set_games_winloss(p1.id, p2.id, game, tie)
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: Vesuvius):
     await bot.add_cog(GameFeatures(bot))
     print('LOADED games')

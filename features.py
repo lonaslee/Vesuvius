@@ -2,29 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import re
 import math
-from datetime import datetime, time as dt_time
-from pathlib import Path
+import re
+from datetime import datetime
+from io import BytesIO
+from typing import TYPE_CHECKING
 
 import discord
-from discord.ext import commands, tasks
-from aiofiles import open as aopen
+from discord.ext import commands
 from matplotlib import pyplot as plt
 
-from extensions import trianglecenters, transformations, wotd
-from extensions.definitions import ANSIColors as C, TZI
+from extensions import ANSIColors as C
+from extensions import transformations, trianglecenters
+
+if TYPE_CHECKING:
+    from extensions.transformations import Equation, Point
+    from extensions.trianglecenters import MatPlotArg, PointDict
+    from vesuvius import Vesuvius
 
 
 class GraphFeatures(commands.Cog):
     """features cog that has the commands to invoke special features that use a graph"""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Vesuvius) -> None:
         self.bot = bot
 
     @commands.command(name='trianglecenters')
     @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
-    async def trianglecenters(self, ctx: commands.Context, *, text: str = None):
+    async def trianglecenters(self, ctx: commands.Context[Vesuvius], *, text: str = ''):
         """calculate orthocenter, circumcenter, and centroid from three coordinate points of a triangle. usage:
         \\`trianglecenters [x, y, x2, y2, x3, y3]"""
         a, b, c = {}, {}, {}
@@ -32,13 +37,12 @@ class GraphFeatures(commands.Cog):
         if text:
             if 'noword' in text:
                 nstr = True
-            mch = re.findall(r'(-?\d+.?\d*?[\s,]*?)', text)
-            mch = [(lambda p: p.strip(' ,(), '))(pt) for pt in mch]
-            mch = [float(p) for p in mch]
+            match: list[str] = re.findall(r'(-?\d+.?\d*?[\s,]*?)', text)
+            points = [float(p.strip(' ,(), ')) for p in match]
             try:
-                a['x'], a['y'] = mch[0], mch[1]
-                b['x'], b['y'] = mch[2], mch[3]
-                c['x'], c['y'] = mch[4], mch[5]
+                a['x'], a['y'] = points[0], points[1]
+                b['x'], b['y'] = points[2], points[3]
+                c['x'], c['y'] = points[4], points[5]
             except ValueError:
                 await ctx.send(
                     f'{C.B}{C.RED}this command must be invoked with all or no points.{C.E}'
@@ -46,23 +50,21 @@ class GraphFeatures(commands.Cog):
                 return
         else:
             try:
-                a['x'], a['y'] = await self.get_point(ctx, 1)
-                b['x'], b['y'] = await self.get_point(ctx, 2)
-                c['x'], c['y'] = await self.get_point(ctx, 3)
-            except ValueError:  # get_point timed out and returned None
+                a['x'], a['y'] = await self.get_point(ctx, 1)  # type: ignore
+                b['x'], b['y'] = await self.get_point(ctx, 2)  # type: ignore
+                c['x'], c['y'] = await self.get_point(ctx, 3)  # type: ignore
+            except TypeError:  # get_point timed out and returned None
                 return
         try:
-            fs, fsnw, mpa = await self.bot.run_in_tpexec(
-                lambda: trianglecenters.main(a, b, c)
-            )
+            fs, fsnw, mpa = await self.bot.run_in_tpexec(trianglecenters.main, a, b, c)
         except ValueError:
-            ctx.send(
-                f'{C.B}{C.RED}not a triangle. if there is nothing wrong with your input, '
-                f'report the error to @\u200b{ctx.guild.get_member(self.bot.owner_id)}{C.E}'
-            )
+            await ctx.send(f'{C.B}{C.RED}not a triangle.{C.E}')
             return
-        path = await self.plt_plt(ctx.message.author, mpa[0], mpa[1], mpa[2], a, b, c)
-        fobj = discord.File(path)
+        buffer = await self.plt_plt(mpa[0], mpa[1], mpa[2], a, b, c)
+        buffer.seek(0)
+        fobj = discord.File(
+            buffer, f'trianglecenters-{datetime.utcnow().strftime("%m-%d-%H-%M")}.png'
+        )
         embed_msg = discord.Embed(
             title='Triangle Centers',
             description=f'```py\n{fsnw if nstr else fs}```',
@@ -73,23 +75,25 @@ class GraphFeatures(commands.Cog):
         await ctx.send(file=fobj, embed=embed_msg)
 
     async def get_point(
-        self, ctx: commands.Context, ptn: int
+        self, ctx: commands.Context[Vesuvius], ptn: int | str
     ) -> tuple[float, float] | None | str:
-        def chkp(m):
+        def chkp(m: discord.Message):
             return m.author == ctx.message.author and m.channel == ctx.channel
 
         await ctx.send(f'point {ptn}:')
+        msg = None
         try:
             msg = await self.bot.wait_for('message', check=chkp, timeout=30)
             if msg.content == 'end':
                 return 'end'
             x, y = re.search(
                 r'(?P<x>-?\d+.?\d*?)[\s,]*?(?P<y>-?\d+.?\d*?)', msg.content
-            ).groups()
+            ).groups()  # type: ignore
         except asyncio.TimeoutError:
             await ctx.send(f'{C.B}{C.RED}command timed out.{C.E}')
             return None
         except ValueError:
+            assert msg is not None
             await ctx.send(
                 f'{C.B}{C.RED}format error: cannot unpack {msg.content}.{C.E}'
             )
@@ -98,17 +102,16 @@ class GraphFeatures(commands.Cog):
 
     async def plt_plt(
         self,
-        caller,
-        ortho: tuple,
-        circum: tuple,
-        medi: tuple,
-        a: dict,
-        b: dict,
-        c: dict,
-    ) -> Path:
-        a = (a['x'], a['y'])
-        b = (b['x'], b['y'])
-        c = (c['x'], c['y'])
+        ortho: MatPlotArg,
+        circum: MatPlotArg,
+        medi: MatPlotArg,
+        a_dict: PointDict,
+        b_dict: PointDict,
+        c_dict: PointDict,
+    ) -> BytesIO:
+        a = (a_dict['x'], a_dict['y'])
+        b = (b_dict['x'], b_dict['y'])
+        c = (c_dict['x'], c_dict['y'])
         xes = (ptx := [float(pt[0]) for pt in [a, b, c]]) + [
             pt[3][0] for pt in [ortho, circum, medi]
         ]
@@ -123,8 +126,8 @@ class GraphFeatures(commands.Cog):
             axis = mx if mx > abs(mn) else abs(mn)
             plt.xlim(axis * -1.25, axis * 1.25)
             plt.ylim(axis * -1.25, axis * 1.25)
-            plt.axhline(y=0, linewidth=2.0, color='dimgrey', linestyle='--')
-            plt.axvline(x=0, linewidth=2.0, color='dimgrey', linestyle='--')
+            plt.axhline(y=0, linewidth=2.0, color='dimgrey', linestyle='--')  # type: ignore
+            plt.axvline(x=0, linewidth=2.0, color='dimgrey', linestyle='--')  # type: ignore
         plt.grid(b=True)
         markers = ['o', 'o', 'o', 'X', 's', 'D']
         colors = ['black', 'black', 'black', 'blue', 'green', 'purple']
@@ -153,43 +156,52 @@ class GraphFeatures(commands.Cog):
                 linewidth=2.0,
                 color='black',
             )
-        tme = datetime.now().strftime('%H%M%S')
-        plt.savefig(
-            fl := Path(
-                f'{self.bot.files["image_files"].as_posix()}/'
-                f'{tme}--{str(caller).replace("#", "")}--plot.png'
-            )
-        )
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
         plt.clf()
-        return fl
+        return buffer
 
     @commands.command(name='transformations')
     @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
-    async def transformations(self, ctx: commands.Context, *, text: str = None):
+    async def transformations(self, ctx: commands.Context[Vesuvius], *, text: str = ''):
         """compute translations, reflections, rotations, and dilations on a set of points. usage: `transformations [x, y, ...]"""
-        pt_lst = []
+        point_list: list[tuple[float, float]]
         if text:
-            pt_lst = re.findall(r'(-?\d+.?\d*?[\s,]*?)', text)
-            pt_lst = [(lambda p: p.strip(' ,(), '))(pt) for pt in pt_lst]
-            pt_lst = [float(p) for p in pt_lst]
-            if len(pt_lst) % 2 != 0:
-                ctx.send(f'{C.B}{C.RED}each point must have x and y.{C.E}')
+            match_list: list[str] = re.findall(r'(-?\d+.?\d*?[\s,]*?)', text)
+            match_list = [pt.strip(' ,(), ') for pt in match_list]
+            num_list = [float(p) for p in match_list]
+
+            if len(point_list) % 2 != 0:
+                await ctx.send(f'{C.B}{C.RED}Each point must have x and y.{C.E}')
                 return
-            pt_lst = [(pt_lst[d], pt_lst[d + 1]) for d in range(0, len(pt_lst), 2)]
+
+            point_list = [
+                (num_list[d], num_list[d + 1]) for d in range(0, len(num_list), 2)
+            ]
+
         else:
             for n in range(100):
-                tup = await self.get_point(ctx, n + 1)
-                if tup == 'end':
+                tup = await self.get_point(ctx, f'{n+1} (send "end" to stop)')
+
+                if isinstance(tup, str):
                     break
                 if tup is None:
-                    return  # get_point timed out and returned None
-                pt_lst.append((tup[0], tup[1]))
-        aps = await self.bot.run_in_tpexec(lambda: transformations.AllPoints(pt_lst))
+                    return  # timeout
+
+                point_list.append(tup)
+
+        aps = await self.bot.run_in_tpexec(
+            lambda: transformations.AllPoints(point_list)
+        )
+        prompt = await ctx.send('transformation (send "end" to stop):')
         for n in range(100):
+            prompt = await prompt.edit(
+                content=f'transformation {n} (send "end" to stop):'
+            )
             res = await self.get_inp(ctx)
             if res is None:
                 return
-            if res != 'end':
+            if not isinstance(res, str):
                 m, a = res
                 await self.bot.run_in_tpexec(lambda: getattr(aps, m)(a))
             ap_str = '\n'.join([str(p) for p in aps.allpoints])
@@ -199,38 +211,42 @@ class GraphFeatures(commands.Cog):
                 colour=discord.Colour.dark_blue(),
                 timestamp=datetime.utcnow(),
             )
-            path = await self.graph_fig(aps, ctx.message.author)
-            fobj = discord.File(path)
+            buffer = await self.graph_fig(aps)
+            buffer.seek(0)
+            fobj = discord.File(
+                buffer,
+                f'transformations-{datetime.utcnow().strftime("%m-%d-%H-%M")}.png',
+            )
             embed_msg.set_image(url=f'attachment://{fobj.filename}')
             await ctx.send(file=fobj, embed=embed_msg)
             if res == 'end':
                 return
 
-    async def get_inp(self, ctx: commands.Context) -> tuple | str | None:
-        await ctx.send('transformation:')
-
-        def chki(m):
+    async def get_inp(
+        self, ctx: commands.Context[Vesuvius]
+    ) -> tuple[str, Point | Equation | tuple[Point, float]] | str | None:
+        def chk(m: discord.Message):
             return m.author == ctx.message.author and m.channel == ctx.channel
 
         msg = None
         try:
-            msg = await self.bot.wait_for('message', check=chki, timeout=30)
+            msg = await self.bot.wait_for('message', check=chk, timeout=30)
             if msg.content == 'end':
                 return 'end'
-            ap_mtd, ap_args = await self.bot.run_in_tpexec(
-                lambda: transformations.Inputs().main(msg.content)
+            return await self.bot.run_in_tpexec(
+                transformations.Inputs().main, msg.content
             )
         except asyncio.TimeoutError:
-            await ctx.send(f'{C.B}{C.RED}command timed out.{C.E}')
+            await ctx.send(f'{C.B}{C.RED}Command timed out.{C.E}')
             return None
         except ValueError:
+            assert msg is not None
             await ctx.send(
                 f'{C.B}{C.RED}format error: cannot unpack {msg.content}{C.E}'
             )
             return await self.get_inp(ctx)
-        return ap_mtd, ap_args
 
-    async def graph_fig(self, apts: transformations.AllPoints, caller) -> Path:
+    async def graph_fig(self, apts: transformations.AllPoints) -> BytesIO:
         avs = list(itertools.chain.from_iterable([[p.x, p.y] for p in apts.allpoints]))
         mx, mn = round(max(avs)), round(min(avs))
         axis = mx * 1.25 if mx > abs(mn) else mn * 1.25
@@ -240,8 +256,8 @@ class GraphFeatures(commands.Cog):
         else:
             plt.xlim(axis, axis * -1)
             plt.ylim(axis, axis * -1)
-            plt.axhline(y=0, linewidth=2.0, color='dimgrey', linestyle='--')
-            plt.axvline(x=0, linewidth=2.0, color='dimgrey', linestyle='--')
+            plt.axhline(y=0, linewidth=2.0, color='dimgrey', linestyle='--')  # type: ignore
+            plt.axvline(x=0, linewidth=2.0, color='dimgrey', linestyle='--')  # type: ignore
         plt.grid(b=True)
         list(
             map(
@@ -261,28 +277,23 @@ class GraphFeatures(commands.Cog):
             plt.plot(
                 [cmb[0].x, cmb[1].x], [cmb[0].y, cmb[1].y], linewidth=2.0, color='black'
             )
-        tme = datetime.now().strftime('%H%M%S')
-        plt.savefig(
-            fl := Path(
-                f'{self.bot.files["image_files"].as_posix()}/'
-                f'{tme}--{str(caller).replace("#", "")}--plot.png'
-            )
-        )
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png')
         plt.clf()
-        return fl
+        return buffer
 
 
 class UtilFeatures(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Vesuvius) -> None:
         self.bot = bot
 
     @commands.command(name='modulo', aliases=['remainder'])
-    async def modulo(self, ctx: commands.Context, n1: float, n2: float):
+    async def modulo(self, ctx: commands.Context[Vesuvius], n1: float, n2: float):
         """remainder of divison. usage: `modulo n1, n2"""
         await ctx.send(f'{n1 % n2}')
 
     @commands.command(name='divmod')
-    async def dvmd(self, ctx: commands.Context, n1: float, n2: float):
+    async def dvmd(self, ctx: commands.Context[Vesuvius], n1: float, n2: float):
         """division with remainder. usage: `divmod n1, n2"""
         res = divmod(n1, n2)
         await ctx.send(f'{res[0]}; {res[1]}')
@@ -290,32 +301,33 @@ class UtilFeatures(commands.Cog):
     @commands.command(name='permutations', aliases=['nPr', 'npr'])
     @commands.max_concurrency(1, commands.BucketType.default)
     @commands.cooldown(1, 360, commands.BucketType.default)
-    async def npr(self, ctx: commands.Context, length: int, *args):
+    async def npr(self, ctx: commands.Context[Vesuvius], length: int, *args: str):
         """n length permutations of given arguments. usage: `permutations length, ..."""
         if len(args) == 1:
-            args = args[0]
+            args = tuple(args[0])
         sep = ''
         if 'sep=' in args[-1]:
             sep = args[-1][4:]
             args = tuple(args[0:-1])
+        if sep == 'space':
+            sep = ' '
         numof = math.factorial(arg_len := len(args)) / math.factorial(arg_len - length)
         if numof > 2000:
             await ctx.send(
                 f'{C.B}{C.RED}result too large.{C.GREEN} number of permutations: '
                 f'{C.CYAN}{numof}.{C.END}'
             )
+            return
         pers = await self.bot.run_in_tpexec(
             lambda: itertools.permutations(args, length)
         )
         joined = '\n'.join([sep.join(a) for a in pers])
         s_now = datetime.now().strftime('%m_%d_%y__%H_%M_%S')
         if numof > 40:
-            async with aopen(
-                path := f'{self.bot.files["text_files"].as_posix()}/permutations{s_now}.txt',
-                'w',
-            ) as f:
-                await f.write(joined)
-            fobj = discord.File(path, filename=f'permutations_{s_now}.txt')
+            buffer = BytesIO()
+            buffer.write(bytes(joined, encoding='utf-8'))
+            buffer.seek(0)
+            fobj = discord.File(buffer, filename=f'permutations_{s_now}.txt')
             await ctx.send(
                 f'{C.B}{C.GREEN}{numof} permutations of {length} length in attached file:{C.E}',
                 file=fobj,
@@ -328,10 +340,10 @@ class UtilFeatures(commands.Cog):
     @commands.command(name='combinations', aliases=['nCr', 'ncr'])
     @commands.max_concurrency(1, commands.BucketType.default)
     @commands.cooldown(1, 360, commands.BucketType.default)
-    async def ncr(self, ctx: commands.Context, length: int, *args):
+    async def ncr(self, ctx: commands.Context[Vesuvius], length: int, *args: str):
         """n length combinations of given arguments. usage: `combinations length, ..."""
         if len(args) == 1:
-            args = args[0]
+            args = tuple(args[0])
         sep = ''
         if 'sep=' in args[-1]:
             sep = args[-1][4:]
@@ -341,23 +353,21 @@ class UtilFeatures(commands.Cog):
             / math.factorial(length)
             * math.factorial(arg_len - length)
         )
-        if arg_len > 2000:
+        if numof > 2000:
             await ctx.send(
                 f'{C.B}{C.RED}result too large.{C.GREEN} number of permutations: '
-                f'{C.CYAN}{arg_len}.{C.END}'
+                f'{C.CYAN}{numof}.{C.END}'
             )
+            return
         pers = await self.bot.run_in_tpexec(
             lambda: itertools.combinations(args, length)
         )
         joined = '\n'.join([sep.join(a) for a in pers])
         s_now = datetime.now().strftime('%m_%d_%y__%H_%M_%S')
         if numof > 40:
-            async with aopen(
-                path := f'{self.bot.files["text_files"].as_posix()}/combinations{s_now}.txt',
-                'w',
-            ) as f:
-                await f.write(joined)
-            fobj = discord.File(path, filename=f'combinations_{s_now}.txt')
+            buffer = BytesIO()
+            buffer.write(bytes(joined, encoding='utf-8'))
+            fobj = discord.File(buffer, filename=f'combinations_{s_now}.txt')
             await ctx.send(
                 f'{C.B}{C.GREEN}{numof} combinations of {length} length in attached file:{C.E}',
                 file=fobj,
@@ -368,90 +378,7 @@ class UtilFeatures(commands.Cog):
             )
 
 
-class Tasks(commands.Cog):
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
-        self.wotd_messages = []
-        self.wotd_channels = []
-        self.wotd.start()
-
-    async def cog_unload(self) -> None:
-        self.wotd.cancel()
-        await super().cog_unload()
-
-    @tasks.loop(time=dt_time(19, tzinfo=TZI()))
-    async def wotd(self):
-        print("WOTD started")
-        self.wotd_messages.clear()
-        ebd = await self.get_wotd()
-        for channel in self.wotd_channels:
-            msg = await channel.send(embed=ebd)
-            self.wotd_messages.append(msg)
-
-    @wotd.before_loop
-    async def before_wotd(self):
-        await self.bot.wait_until_ready()
-        self.wotd_channels = [
-            self.bot.get_channel(956339556435759136),  # smesper general
-            self.bot.get_channel(960200050389172344),  # testga cout
-            self.bot.get_channel(972593770283565169),  # testoo clog
-        ]
-
-    async def get_wotd(self, redo=False) -> discord.Embed:
-        yesterday = await self.bot.database.get_wotd_yesterday()
-        title, summary, url, image = await wotd.oneworder(self.bot.files['words_alpha'])
-        ebd = discord.Embed(
-            title=f'Word of the Day #{yesterday[0] + 1}: {title}',
-            description=f'{summary}\n{url}',
-            colour=discord.Colour.dark_teal(),
-        )
-        if image:
-            ebd.set_image(url=image)
-        if not redo:
-            await self.bot.database.set_wotd_newday(title)
-        return ebd
-
-    @commands.command(name='wotdmanual')
-    @commands.is_owner()
-    @commands.guild_only()
-    async def wotdmanual(self, ctx: commands.Context):
-        self.wotd_messages.clear()
-        await ctx.send(f'{C.B}{C.RED}wotd manual start. DO THE DB{C.E}')
-        ebd = await self.get_wotd(self.bot.files['words_alpha'])
-        for channel in self.wotd_channels:
-            msg = await channel.send(embed=ebd)
-            self.wotd_messages.append(msg)
-        await ctx.send(f'{C.B}{C.BOLD_GREEN}done.{C.E}')
-
-    @commands.command(name='wotdnew')
-    @commands.is_owner()
-    @commands.guild_only()
-    async def wotdnew(self, ctx: commands.Context):
-        def chk(m):
-            return m.author == ctx.author and m.channel == ctx.channel
-
-        await ctx.send(
-            f"{C.B}{C.BOLD_RED}are you sure you want to change today's wotd?{C.E}"
-        )
-        try:
-            m = await self.bot.wait_for('message', check=chk, timeout=10)
-        except asyncio.TimeoutError:
-            await ctx.send(f'{C.B}{C.RED}wotd redo cancelled.{C.E}')
-            return
-        if m.content == 'yes':
-            ebd = await self.get_wotd(True)
-            for k, channel in enumerate(self.wotd_channels):
-                msg = await (
-                    await channel.fetch_message(self.wotd_messages[k].id)
-                ).edit(embed=ebd)
-                self.wotd_messages[k] = msg
-            await ctx.send(f'{C.B}{C.BOLD_GREEN}done.{C.E}')
-        else:
-            await ctx.send(f'{C.B}{C.RED}cancelled.{C.E}')
-
-
-async def setup(bot: commands.Bot):
+async def setup(bot: Vesuvius):
     await bot.add_cog(GraphFeatures(bot))
     await bot.add_cog(UtilFeatures(bot))
-    await bot.add_cog(Tasks(bot))
     print('LOADED features')

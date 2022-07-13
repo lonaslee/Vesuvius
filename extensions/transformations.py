@@ -109,7 +109,7 @@ class Equation:
     def b(self) -> float:
         return float(self.eq[self.eq.index('x') + 1 :].lstrip('+'))
 
-    def __eq__(self, other: Equation):
+    def is_equal(self, other: Equation):
         x, y = float(), float()
         match other.rslope, self.rslope:
             case 'undef', 0:
@@ -135,8 +135,11 @@ class Equation:
         return Point(x, y)
 
 
+TuplePoint = tuple[float, float]
+
+
 class AllPoints:
-    def __init__(self, ap: list[tuple[float, float]]) -> None:
+    def __init__(self, ap: list[TuplePoint] | tuple[TuplePoint, ...]) -> None:
         self.allpoints = [Point(p[0], p[1]) for p in ap]
 
     @staticmethod
@@ -169,8 +172,8 @@ class AllPoints:
     @staticmethod
     def refl_undef(pt, lor) -> None:
         shift = abs(pt.x - lor.m)  # If x is to the right of the
-        if pt.x >= lor.m:          # line of ref, then shift has to be
-            shift *= -1            # negative for the next point
+        if pt.x >= lor.m:  # line of ref, then shift has to be
+            shift *= -1  # negative for the next point
         pt.x = lor.m + shift
 
     @staticmethod
@@ -183,7 +186,7 @@ class AllPoints:
     @staticmethod
     def refl_else(pt, lor) -> None:
         perp_line = Line(pt, None, None, lor.m**-1 * -1).eq
-        intersection = (perp_line == lor)
+        intersection = perp_line.is_equal(lor)
         len_from_point = Line(pt, intersection).length
         new_points = Line(intersection, None, len_from_point, perp_line.m).b
         if str(new_points[0]) == str(pt):
@@ -211,7 +214,7 @@ class AllPoints:
 
 
 class Inputs:
-    def main(self, val):
+    def main(self, val: str) -> tuple[str, Point | Equation | tuple[Point, float]]:
         name_dict = {
             'T': 'translate_all',
             'r': 'reflect_all',
@@ -230,7 +233,7 @@ class Inputs:
             match_list.reverse()
             for t in match_list:
                 func_args = self.rematch(t, t[0])
-                return name_dict[t[0]], type_dict[t[0]](*func_args)
+                return name_dict[t[0]], type_dict[t[0]](*func_args)  # FIXME yield
         else:
             func_args = self.rematch(this_oper[0], this_oper[1:])
             return name_dict[this_oper[0]], type_dict[this_oper[0]](*func_args)

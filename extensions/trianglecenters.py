@@ -339,7 +339,12 @@ def centroid(a, b, c) -> dict:
     }
 
 
-def main(a, b, c) -> tuple[str, str, list]:
+Slope = float | str
+PointDict = dict[str, int]
+MatPlotArg = tuple[Slope, Slope, Slope, tuple[float, float]]
+
+
+def main(a: PointDict, b: PointDict, c: PointDict) -> tuple[str, str, list[MatPlotArg]]:
     # a, b, c = get_inputs()   <- original trianglecenters was a cmd application,
     #                             get inputs invokes input() which we don't want
     ab_slope = slope_equation(slope(a["x"], a["y"], b["x"], b["y"]), a["x"], a["y"], True)["pr"]

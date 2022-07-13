@@ -1,27 +1,32 @@
 from __future__ import annotations
 
-import re
 import asyncio
-from typing import Literal
 from datetime import datetime
+from io import BytesIO
 from time import time
+from typing import TYPE_CHECKING, Literal, Optional, TypeGuard
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image
 
-from extensions.definitions import owner_bypass, ANSIColors as C
+from extensions import ANSIColors as C
+from extensions.definitions import owner_bypass
+
+if TYPE_CHECKING:
+    from vesuvius import Vesuvius
 
 
 class OwnerCommands(commands.Cog):
     """commands for owner to use"""
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: Vesuvius):
         self.bot = bot
 
     @commands.command(name='exit')
     @commands.is_owner()
-    async def exit(self, ctx: commands.Context):
+    async def exit(self, ctx: commands.Context[Vesuvius]):
         """close the event loop"""
 
         if await self.confirm(ctx, 'exit'):
@@ -34,9 +39,14 @@ class OwnerCommands(commands.Cog):
     @commands.is_owner()
     async def reload(
         self,
-        ctx: commands.Context,
-        extension: Literal['all', 'commands', 'events', 'features', 'games', 'testing'],
+        ctx: commands.Context[Vesuvius],
+        extension: Optional[
+            Literal['all', 'commands', 'events', 'features', 'games', 'testing']
+        ],
     ):
+        if not extension:
+            extension = self.bot.last_reload
+        self.bot.last_reload = extension
         await ctx.send(f'{C.B}{C.BOLD_GREEN}Reloading {C.YELLOW}{extension}.{C.E}')
         print(f'RELOADING {extension}')
         if extension == 'all':
@@ -51,7 +61,9 @@ class OwnerCommands(commands.Cog):
     @commands.command(name='sync')
     @commands.is_owner()
     async def sync_tree(
-        self, ctx: commands.Context, scope: Literal['local', 'global'] = 'local'
+        self,
+        ctx: commands.Context[Vesuvius],
+        scope: Literal['local', 'global'] = 'local',
     ):
         msg = await ctx.send(f'{C.B}{C.BOLD_YELLOW}syncing...{C.E}')
         synced_commands = ', '.join(
@@ -80,6 +92,7 @@ class OwnerCommands(commands.Cog):
         status: Literal['online', 'idle', 'do not disturb', 'invisible'],
     ):
         """set the status of the bot. usage: `setstatus {online, idle, dnd, offline}"""
+        assert interaction.guild is not None
         activity_before = interaction.guild.me.activity
         match status:
             case 'online':
@@ -90,7 +103,7 @@ class OwnerCommands(commands.Cog):
                 sts = discord.Status.do_not_disturb
             case 'idle':
                 sts = discord.Status.idle
-        await self.bot.change_presence(activity=activity_before, status=sts)
+        await self.bot.change_presence(activity=activity_before, status=sts)  # type: ignore
         await interaction.response.send_message(
             f'{C.B}{C.GREEN}set status to {sts}.{C.E}'
         )
@@ -107,8 +120,9 @@ class OwnerCommands(commands.Cog):
         activity: str,
     ):
         """set the activity of the bot. usage: `setactivity {playing, streaming, watching, listening, competing} ..."""
+        assert interaction.guild is not None
         status_before = interaction.guild.me.status
-        match activity_type := activity_type.lower():
+        match activity_type:
             case 'playing':
                 new_act = discord.Game(activity)
             case 'streaming':
@@ -142,7 +156,7 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='exec')
     @commands.is_owner()
-    async def execbot(self, ctx: commands.Context, *, exc: str):
+    async def execbot(self, ctx: commands.Context[Vesuvius], *, exc: str):
         if await self.confirm(ctx, f'exec  "{exc}"  '):
             return
         exec(exc)
@@ -150,7 +164,7 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='dbexec')
     @commands.is_owner()
-    async def dbexec(self, ctx: commands.Context, *, query: str):
+    async def dbexec(self, ctx: commands.Context[Vesuvius], *, query: str):
         query = query.replace('`', '')
         if await self.confirm(ctx, f'execute the query  "{query}" in the database'):
             return
@@ -160,23 +174,87 @@ class OwnerCommands(commands.Cog):
         await ctx.send(f'```py\n\u200b{datastr}```')
         await self.bot.database.connection.commit()
 
+    @commands.command(name='webhook')
+    @commands.has_guild_permissions(manage_webhooks=True)
+    async def webhook_send(
+        self, ctx: commands.Context[Vesuvius], name: str, content: str
+    ) -> None:
+        assert ctx.guild is not None
+        for webhook in await ctx.guild.webhooks():
+            assert webhook.name is not None
+            if webhook.name.lower() == name.lower():
+                await webhook.send(content)
+                return
+
+    @commands.command(name='webhookebd')
+    @commands.has_guild_permissions(manage_webhooks=True)
+    async def send_webhook_ebd(
+        self,
+        ctx: commands.Context[Vesuvius],
+        name: str,
+        title: str,
+        description: str,
+        color: str,
+    ) -> None:
+        """Send an embed from a webhook.
+
+        Params
+        -----
+        Wrap all parameters in double quotes if it includes a space.
+        name:
+            The name of the webhook.
+        title:
+            The title of the embed.
+        description:
+            The description of the embed.
+        color:
+            The color of the embed, in formats `0x<hex>` or `#<hex>` or `0x#<hex>` or `rgb(<number>, <number>, <number>)`
+        """
+        assert ctx.guild is not None
+        for webhook in await ctx.guild.webhooks():
+            assert webhook.name is not None
+            if webhook.name.lower() == name.lower():
+                await webhook.send(
+                    embed=discord.Embed(
+                        title=title,
+                        description=description,
+                        color=discord.Color.from_str(color) if color else None,
+                    )
+                )
+                return
+        await ctx.send(f'{C.B}{C.RED}No webhook with the name {name} found.{C.E}')
+
     @commands.command(name='sendtf')
     @commands.is_owner()
-    async def send_tf(self, ctx: commands.Context, channel: int):
-        channel = self.bot.get_channel(channel)
+    async def send_tf(self, ctx: commands.Context[Vesuvius], channel_id: int):
+        channel = self.bot.get_channel(channel_id)
+
+        if not await self.text_channel_check(channel, ctx=ctx):
+            return
+        assert isinstance(channel, discord.TextChannel)
+        # for some reason async typeguards don't work
+
         if await self.confirm(
             ctx,
             'send <:tf:968279073367400458> '
             f'to channel  "{channel.name}"  in guild  "{channel.guild.name}" ',
         ):
             return
+
         await channel.send('<:tf:968279073367400458>')
         await ctx.send(f'{C.B}{C.BOLD_GREEN}sent!{C.E}')
 
     @commands.command(name='sendmsg')
     @commands.is_owner()
-    async def sendmsg(self, ctx: commands.Context, channel: int, *, msg: str):
-        channel = self.bot.get_channel(channel)
+    async def send_msg(
+        self, ctx: commands.Context[Vesuvius], channel_id: int, *, msg: str
+    ):
+        channel = self.bot.get_channel(channel_id)
+
+        if not await self.text_channel_check(channel, ctx=ctx):
+            return
+        assert isinstance(channel, discord.TextChannel)
+
         if await self.confirm(
             ctx,
             f'send  "{msg}"  '
@@ -188,9 +266,16 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='delmsg')
     @commands.is_owner()
-    async def dele(self, ctx: commands.Context, chid: int, msgid: int):
-        channel = self.bot.get_channel(chid)
-        message = await channel.fetch_message(msgid)
+    async def del_msg(
+        self, ctx: commands.Context[Vesuvius], channel_id: int, message_id: int
+    ):
+        channel = self.bot.get_channel(channel_id)
+
+        if not await self.text_channel_check(channel, ctx=ctx):
+            return
+        assert isinstance(channel, discord.TextChannel)
+
+        message: discord.Message = await channel.fetch_message(message_id)
         content = message.content
         if content == '':
             content = ', '.join([a.filename for a in message.attachments])
@@ -205,16 +290,26 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='getmsg')
     @commands.is_owner()
-    async def getmsg(self, ctx: commands.Context, channel_id: int, msg_id: int):
+    async def get_msg(
+        self, ctx: commands.Context[Vesuvius], channel_id: int, msg_id: int
+    ):
         channel = self.bot.get_channel(channel_id)
-        if channel_id is None:
-            await ctx.send(f'{C.B}{C.BOLD_RED}channel not found.{C.E}')
+
+        if not await self.text_channel_check(channel, ctx=ctx):
             return
+        assert isinstance(channel, discord.TextChannel)
+
         message = await channel.fetch_message(msg_id)
         create_time = message.created_at.strftime("%A of %x, at %I:%M:%S %p")
         edit_at_time = '\u200b'
         if message.edited_at is not None:
-            edit_at_time = f'edited at - {message.edited_at.strftime("%A of %x, at %I:%M:%S %p")}\n'
+            edit_at_time = (
+                'edited at - '
+                f'{message.edited_at.strftime("%A of %x, at %I:%M:%S %p")}\n'
+            )
+
+        assert isinstance(message.channel, discord.TextChannel)
+        assert isinstance(message.guild, discord.Guild)
         ebd = discord.Embed(
             title=f'Message by {message.author.name}\nin channel '
             f'"{message.channel.name}" of guild "{message.guild.name}"',
@@ -225,26 +320,30 @@ class OwnerCommands(commands.Cog):
 
     @commands.command(name='getchannel')
     @commands.is_owner()
-    async def getchannel(self, ctx: commands.Context, channel_id: int):
-        ch = await self.bot.fetch_channel(channel_id)
+    async def getchannel(self, ctx: commands.Context[Vesuvius], channel_id: int):
+        try:
+            channel = await self.bot.fetch_channel(channel_id)
+        except discord.NotFound:
+            await ctx.send(f'{C.B}{C.RED}No channel with id {channel_id} found.{C.E}')
+            return
+
+        assert isinstance(channel, discord.abc.Messageable)
         await ctx.send(
-            f'{C.B}{C.BOLD_GREEN}channel {C.WHITE} "{ch.name}" '
-            f'{C.BOLD_GREEN} in guild {C.WHITE} "{ch.guild}." {C.E}'
+            f'{C.B}{C.BOLD_GREEN}channel {C.WHITE} "{channel.name}" '
+            f'{C.BOLD_GREEN} in guild {C.WHITE} "{channel.guild}." {C.E}'
         )
 
     @commands.command(name='getuser')
     @commands.is_owner()
-    async def getuser(self, ctx: commands.Context, user: discord.User):
+    async def getuser(self, ctx: commands.Context[Vesuvius], user: discord.User):
         info = f'id: {user.id}\naccount created at {user.created_at}\n'
         ebd = discord.Embed(
             title=user.name, description=info, color=discord.Color.darker_gray()
         )
         await ctx.send(embed=ebd)
 
-    async def confirm(
-        self, ctx_info: commands.Context | discord.Interaction, action: str
-    ) -> int:
-        def chk(msg: discord.Message):
+    async def confirm(self, ctx_info: commands.Context[Vesuvius], action: str) -> int:
+        def chk(msg: discord.Message) -> bool:
             return msg.author == ctx_info.author and msg.channel == ctx_info.channel
 
         await ctx_info.send(
@@ -261,15 +360,100 @@ class OwnerCommands(commands.Cog):
             await ctx_info.send(f'{C.B}{C.RED}cancelled.{C.E}')
             return 1
 
+    @staticmethod
+    async def text_channel_check(
+        __channel: discord.abc.GuildChannel
+        | discord.abc.PrivateChannel
+        | discord.Thread
+        | None,
+        *,
+        ctx: commands.Context[Vesuvius],
+    ) -> TypeGuard[discord.TextChannel]:
+        if __channel is None:
+            await ctx.send(f'{C.B}{C.RED}Cannot find channel.{C.E}')
+            return False
+
+        if not isinstance(__channel, discord.TextChannel):
+            await ctx.send(f'{C.B}{C.RED}Cannot send to non-text channels.{C.E}')
+            return False
+
+        return True
+
+
+class ServerCommands(commands.Cog):
+    def __init__(self, bot: Vesuvius) -> None:
+        self.bot = bot
+
+    @commands.command(name='ban')
+    @commands.guild_only()
+    @commands.has_guild_permissions(moderate_members=True)
+    async def ban_user(
+        self, ctx: commands.Context[Vesuvius], member: discord.Member, reason: str
+    ) -> None:
+        await member.ban(reason=reason)
+        await ctx.send(f'{C.B}{C.RED}Banned {member.name} for {reason}.{C.E}')
+
+    @commands.command(name='unban')
+    @commands.guild_only()
+    @commands.has_guild_permissions(moderate_members=True)
+    async def unban_user(
+        self, ctx: commands.Context[Vesuvius], member: discord.User, reason: str
+    ) -> None:
+        assert ctx.guild is not None
+        await ctx.guild.unban(member, reason=reason)
+        await ctx.send(f'{C.B}{C.RED}Unbanned {member.name} for {reason}.{C.E}')
+
+    @commands.command(name='set-channels')
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def set_channels(
+        self,
+        ctx: commands.Context[Vesuvius],
+        option: Literal[0, 1],
+        general_channel: discord.TextChannel,
+        announcements_channel: discord.TextChannel,
+    ):
+        assert ctx.guild is not None
+        await self.bot.database.set_channels(
+            ctx.guild.id, option, general_channel.id, announcements_channel.id
+        )
+        await ctx.send(
+            f'{C.B}{C.GREEN}Succesfully set channels general: {general_channel}'
+            f' and announcemets: {announcements_channel}.{C.E}'
+        )
+
+    @commands.command(name='get-channels')
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def get_channels(self, ctx: commands.Context[Vesuvius]):
+        assert ctx.guild is not None
+        guild, option, general, announcements = await self.bot.database.get_channel(
+            ctx.guild.id
+        )
+        await ctx.send(
+            f'```apache\nguild: {self.bot.get_guild(guild)}\noption: {option}\n'
+            f'general: {self.bot.get_channel(general)}\n'
+            f'announcments: {self.bot.get_channel(announcements)}```'
+        )
+
+    @commands.command(name='flush')
+    @commands.has_guild_permissions(manage_messages=True)
+    async def flush_channel(self, ctx: commands.Context[Vesuvius], number: int):
+        async for message in ctx.channel.history(limit=number):
+            await message.delete()
+            await asyncio.sleep(0.3)
+
 
 class GeneralCommands(commands.Cog):
     """general commands everyone can use with a cooldown"""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: Vesuvius) -> None:
         self.bot = bot
 
-    @commands.hybrid_command(name='help')
-    async def help(self, ctx: commands.Context, command: str = None):
+    @commands.hybrid_command(name='help', aliases=['h'])
+    async def help(
+        self, ctx: commands.Context[Vesuvius], command: Optional[str] = None
+    ):
         """display help for commands. usage: `help [command]"""
         if not command:
             ebd = await self.default_help()
@@ -297,8 +481,11 @@ class GeneralCommands(commands.Cog):
             f'optional arguments, {C.RED}{{}}{C.YELLOW}: possible values{C.E}',
             colour=discord.Colour.dark_orange(),
         )
-        cmds = '\n`'.join(['`help', 'info', 'leaderboard', 'snipe', 'source'])
-        cmds2 = '\n`'.join(
+        cmds = '\n`'.join(['`help', 'info', 'source'])
+        games = '\n'.join(
+            ['tictactoe', 'connectfour', 'reversi', 'weiqi', 'battleship']
+        )
+        math = '\n`'.join(
             [
                 '`modulo',
                 'divmod',
@@ -308,26 +495,23 @@ class GeneralCommands(commands.Cog):
                 'combinations\n',
             ]
         )
-        cmds3 = '\n`'.join(
-            ['`tictactoe', 'connectfour', 'reversi', 'weiqi', 'battleship']
-        )
-        embed_msg.add_field(name='commands:', value=f'{C.B}{C.BLUE}{cmds}{C.E}')
-        embed_msg.add_field(name='games:', value=f'{C.B}{C.PINK}{cmds3}{C.E}')
-        embed_msg.add_field(name='math:', value=f'{C.B}{C.CYAN}{cmds2}{C.E}')
 
+        embed_msg.add_field(name='commands:', value=f'{C.B}{C.BLUE}{cmds}{C.E}')
+        embed_msg.add_field(name='games - /play:', value=f'{C.B}{C.PINK}{games}{C.E}')
+        embed_msg.add_field(name='math:', value=f'{C.B}{C.CYAN}{math}{C.E}')
         embed_msg.add_field(
             name='errors:',
             value='report all bugs (there are a lot of them) to zhona#2155',
             inline=False,
         )
         embed_msg.set_footer(
-            text='slash commands, buttons, dropdown menus coming "soon"'
+            text='slash commands, buttons, dropdown menus coming "soon™"'
         )
         return embed_msg
 
     @commands.command(name='source', aliases=['src'])
     @commands.dynamic_cooldown(owner_bypass(240), type=commands.BucketType.channel)
-    async def source(self, ctx: commands.Context):
+    async def source(self, ctx: commands.Context[Vesuvius]):
         """link to source code repository."""
         ebd = discord.Embed(
             title='Source Code',
@@ -338,7 +522,7 @@ class GeneralCommands(commands.Cog):
 
     @commands.hybrid_command(name='info')
     @commands.dynamic_cooldown(owner_bypass(120), type=commands.BucketType.channel)
-    async def info(self, ctx: commands.Context):
+    async def info(self, ctx: commands.Context[Vesuvius]):
         """info about the current instance of the bot."""
         ping = round(self.bot.latency * 1000)
         delta = datetime.now() - self.bot.start_time
@@ -353,149 +537,11 @@ class GeneralCommands(commands.Cog):
             f'Running for {delta}```'
         )
 
-    @commands.command(name='wins', aliases=['leaderboard'])
-    @commands.cooldown(rate=1, per=180, type=commands.BucketType.channel)
-    @commands.guild_only()
-    async def wins(self, ctx: commands.Context, *, gameorplayer: str = None):
-        """display the leaderboard for wins in games! usage: `leaderboard [game | player]"""
-        pats = {
-            'tictactoe': r'tic[- ]?tac[- ]?toe|(t[- ]?){3}',
-            'connectfour': r'connect[- ]?(four|4)|c[- ]?f',
-            'reversi': r'reversi|rvsi|othello|oto',
-            'weiqi': r'weiqi|wq|go',
-            'battleship': r'battle[- ]?ship|bsh?',
-        }
-        if gameorplayer:
-            for key, pat in zip(pats, pats.values()):
-                if re.search(pat, gameorplayer.strip().lower()):
-                    ebd = await self.ranks_embed(
-                        await self.game_ranks(key), title=f'{key} Leaderboard'
-                    )
-                    await ctx.send(embed=ebd)
-                    return
-            else:
-                player = await commands.MemberConverter().convert(
-                    ctx, gameorplayer.strip()
-                )  # raises command.BadArgument
-                ebd = await self.ranks_embed(
-                    await self.player_ranks(player.id),
-                    title=f'Rank of {player.display_name}',
-                )
-                await ctx.send(embed=ebd)
-                return
-        else:
-            ebd = await self.ranks_embed(await self.all_ranks())
-            await ctx.send(embed=ebd)
-
-    @staticmethod
-    async def ranks_embed(ranks: list[list], title='Leaderboard') -> discord.Embed:
-        ebd = discord.Embed(
-            title=title.capitalize(),
-            description='ranked by win/loss/tie ratios!',
-            colour=discord.Colour.brand_green(),
-        )
-        start = 0
-        cutoff = 13
-        if 'battleship' in title:
-            cutoff = 10
-        if 'Leaderboard' in title:
-            start = 3
-            top_three = (
-                f'```ansi\n\u001b[0m\u001b[4;37m'
-                f'\u001b[1;33m#1 | {ranks[0][2][:cutoff]}🥇 {ranks[0][1]}\n'
-                f'\u001b[1;30m#2 | {ranks[1][2][:cutoff]}🥈 {ranks[1][1]}\n'
-                f'\u001b[1;31m#3 | {ranks[2][2][:cutoff]}🥉 {ranks[2][1]}```'
-            )
-            ebd.add_field(name='\u200b', value=top_three, inline=False)
-        for n in range(start, len(ranks), 5):
-            ebdstr = ''
-            for i in range(5):
-                if (n + i) >= len(ranks):
-                    break
-                ebdstr += f'#{ranks[n + i][3]} | {ranks[n + i][2]}\n'
-            ebd.add_field(
-                name='\u200b',
-                value=f'```ansi\n\u001b[0m\u001b[4;36m{ebdstr}```',
-                inline=False,
-            )
-        return ebd
-
-    async def game_ranks(self, game: str) -> list[list]:
-        ranks: list = await self.bot.database.get_games_winloss()
-        indexdict = {
-            'tictactoe': [1, 2, 3],
-            'connectfour': [4, 5, 6],
-            'reversi': [7, 8, 9],
-            'weiqi': [10, 11, 12],
-            'battleship': [13, 14],
-        }
-        key = indexdict.get(game)
-        for k, lst in enumerate(ranks):
-            ranks[k] = [
-                lst[0],
-                '',
-                ':'.join([str(lst[k]).rjust(3, '~') for k in key]),
-                lst[key[0]] - lst[key[1]],
-            ]
-            dis_name = (await self.bot.fetch_user(lst[0])).display_name
-            if len(dis_name) > 25:
-                ranks[k][2] += ' | ' + dis_name[:18] + '...'
-                ranks[k][1] = dis_name[:18] + '...'
-            else:
-                ranks[k][2] += ' | ' + dis_name
-                ranks[k][1] = dis_name
-        ranks.sort(key=(lambda l: l[3]), reverse=True)
-        for k, lst in enumerate(ranks):
-            ranks[k][3] = k + 1
-        return ranks
-
-    async def all_ranks(self) -> list[list]:
-        ranks: list = await self.bot.database.get_games_winloss()
-        for k, lst in enumerate(ranks):
-            wins = sum([lst[n] for n in range(1, 14, 3)])
-            loss = sum([lst[n] for n in range(2, 15, 3)])
-            ties = sum([lst[n] for n in range(3, 14, 3)])
-            ranks[k] = [
-                lst[0],
-                '',
-                ':'.join([str(n).rjust(3, '~') for n in [wins, loss, ties]]),
-                wins - loss,
-            ]
-            dis_name = (await self.bot.fetch_user(lst[0])).display_name
-            if len(dis_name) > 25:
-                ranks[k][2] += ' | ' + dis_name[:18] + '...'
-                ranks[k][1] = dis_name[:18] + '...'
-            else:
-                ranks[k][2] += ' | ' + dis_name
-                ranks[k][1] = dis_name
-        ranks.sort(key=(lambda l: l[3]), reverse=True)
-        for k, lst in enumerate(ranks):
-            ranks[k][3] = k + 1
-        return ranks
-
-    async def player_ranks(self, user_id: int) -> list[list, list, list]:
-        ranks = await self.all_ranks()
-        k = 0
-        for k, p in enumerate(ranks):
-            if p[0] == user_id:
-                ranks[k][2] = f'\u001b[1;47m{p[2]}\u001b[0m\u001b[4;36m'
-                ranks[k][3] = k + 1
-                break
-        lst = []
-        if (k - 1) >= 0:
-            ranks[k - 1][3] = k
-            lst.append(ranks[k - 1])
-        lst.append(ranks[k])
-        if (k + 1) < len(ranks):
-            ranks[k + 1][3] = k + 2
-            lst.append(ranks[k + 1])
-        print(f"DBG {lst}")
-        return lst
-
     @commands.command(name='c4')
     @commands.dynamic_cooldown(owner_bypass(60), type=commands.BucketType.user)
-    async def c4(self, ctx: commands.Context, *, fillers=None):
+    async def c4(self, ctx: commands.Context[Vesuvius], *, fillers: Optional[str]):
         """suprise for people who use \\`c4 as a shorthand for \\`connectfour"""
+        del fillers
         msg = await ctx.message.reply(f'{C.B}{C.YELLOW}bomb has been planted!{C.E}')
         next = f'{C.B}{C.YELLOW}bomb has been planted!{C.E}'
         for n in reversed(range(1, 6)):
@@ -506,8 +552,22 @@ class GeneralCommands(commands.Cog):
         next = next.removesuffix('```')
         msg = await msg.edit(content=next + f'\n{C.BOLD_RED}BOOM! 💥{C.E}')
 
+    @commands.command(name='color')
+    async def rgb_color(self, ctx: commands.Context[Vesuvius], clr: str):
+        color = discord.Colour.from_str(clr)
+        rgb = color.to_rgb()
+        img = Image.new('RGB', (100, 100), rgb)
+        buffer = BytesIO()
+        img.save(buffer, 'png')
+        buffer.seek(0)
+        file = discord.File(buffer, filename=f'color-{rgb[0]}-{rgb[1]}-{rgb[2]}.png')
+        embed = discord.Embed(title=f'RGB: {rgb}', colour=color)
+        embed.set_image(url=f'attachment://{file.filename}')
+        await ctx.send(embed=embed, file=file)
 
-async def setup(bot: commands.Bot):
+
+async def setup(bot: Vesuvius):
     await bot.add_cog(OwnerCommands(bot))
+    await bot.add_cog(ServerCommands(bot))
     await bot.add_cog(GeneralCommands(bot))
     print('LOADED commands')
