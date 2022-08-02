@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import datetime
+from itertools import zip_longest
+from typing import Any, Callable, Sequence, cast
 
 import aiosqlite
-import discord
-from typing import cast
-
 import config
+import discord
 
+__all__ = (
+    'NUM_EMOTES',
+    'CHAR_EMOTES',
+    'owner_bypass',
+    'justice',
+    'horizontal_join',
+    'tzi',
+    'Database',
+    'ANSIColors',
+)
 
 NUM_EMOTES = (
     '1\N{variation selector-16}\N{combining enclosing keycap}',
@@ -19,7 +29,7 @@ NUM_EMOTES = (
     '7\N{variation selector-16}\N{combining enclosing keycap}',
     '8\N{variation selector-16}\N{combining enclosing keycap}',
     '9\N{variation selector-16}\N{combining enclosing keycap}',
-    '🔟',
+    '\U0001f51f',
 )
 
 CHAR_EMOTES = (
@@ -71,6 +81,49 @@ def owner_bypass(time: int):
         return discord.app_commands.Cooldown(1, time)
 
     return cooldown_func
+
+
+def justice(
+    *args: Sequence[Any],
+    fillchar: str = ' ',
+    ljust_fn: Callable[[str, int, str], str] = lambda s, w, f: s.ljust(w, f),
+    cjust_fn: Callable[[str, int, str], str] = lambda s, w, f: s.center(w, f),
+    rjust_fn: Callable[[str, int, str], str] = lambda s, w, f: s.rjust(w, f),
+) -> tuple[tuple[str, ...], ...]:
+    """Justify elements of multiple iterables in relation to eachother.
+
+    For each index of the iterables, the elements are casted to string and padded using string
+    justifying methods with fillchar to the length of the longest of the elements of that index.
+    """
+    ls = tuple(tuple(str(e) for e in seq) for seq in args)
+    max_lens = [0 for _ in range(len(ls[0]))]
+    for l in ls:
+        for k, v in enumerate(l):
+            if len(v) > max_lens[k]:
+                max_lens[k] = len(v)
+    return tuple(
+        (
+            ljust_fn(t[0], max_lens[0], fillchar),
+            *(cjust_fn(m, max_lens[n + 1], fillchar) for n, m in enumerate(t[1:-1])),
+            rjust_fn(t[-1], max_lens[-1], fillchar),
+        )
+        for t in ls
+    )
+
+
+def horizontal_join(
+    *args: str, sep: str = ' ', fillval: str = ' ', fillchar: str = ' '
+) -> str:
+    """Make multiple multiline strings into one string."""
+    return '\n'.join(
+        sep.join(lines)
+        for lines in justice(
+            *zip_longest(*(s.splitlines() for s in args), fillvalue=fillval),
+            fillchar=fillchar,
+            cjust_fn=(lambda s, w, f: s.ljust(w, f)),
+            rjust_fn=(lambda s, w, f: s.ljust(w, f)),
+        )
+    )
 
 
 class _TimeZoneInfo(datetime.tzinfo):
@@ -298,42 +351,3 @@ class ANSIColors:
                         if format == 'UNDERLINE_' and format2 == 'BOLD_':
                             continue
                         setattr(cls, attr_name, attr_val)
-
-
-# fmt: off
-holidays = {
-    (1, 1): ("New Year's Day", 'FF3333', 'https://upload.wikimedia.org/wikipedia/commons/e/eb/Mexico_City_New_Years_2013%21_%288333128248%29.jpg'),
-    (1, 22): ("Chinese New Year", 'FF0000', 'https://upload.wikimedia.org/wikipedia/commons/d/d1/Kung_Hei_Fat_Choi%21_%286834861529%29.jpg'),  # c
-    (2, 2): ("Groundhog Day (Holiday)", '784212', 'https://upload.wikimedia.org/wikipedia/commons/e/ee/Groundhog-Standing2.jpg'),
-    (2, 14): ("Valentine's Day", 'FF6BF4', 'https://upload.wikimedia.org/wikipedia/commons/1/11/Persian_Valentine%27s_Day_Karaji_%2850957801252%29_-_Edited.jpg'),
-    (3, 1): ("Saint Patrick's Day", '2ECC71', 'https://upload.wikimedia.org/wikipedia/commons/0/0c/Irish_clover.jpg'),
-    (3, 8): ("Holi (Holiday)", 'FF6E33', 'https://upload.wikimedia.org/wikipedia/commons/b/bd/Holi_shop.jpg'),  # c
-    (3, 22): ("Ramadan", '85C1E9', 'https://upload.wikimedia.org/wikipedia/commons/0/00/%D9%87%D9%84%D8%A7%D9%84_%D8%B1%D9%85%D8%B6%D8%A7%D9%86.jpg'),  # c
-    (3, 29): ("Memorial Day (Holiday):", '2980B9', 'https://upload.wikimedia.org/wikipedia/commons/e/e3/Graves_at_Arlington_on_Memorial_Day.JPG'),
-    (4, 5): ("Passover (Holiday)", 'D7FF33', 'https://upload.wikimedia.org/wikipedia/commons/b/b4/Israel%27s_Escape_from_Egypt.jpg'),  # c
-    (4, 9): ("Easter (Holiday) (Easter)", 'E3A6E9', 'https://upload.wikimedia.org/wikipedia/commons/1/10/Easter_eggs_-_straw_decoration.jpg'),  # c
-    (4, 21): ("Eid al-Fitr", '3D884E', 'https://upload.wikimedia.org/wikipedia/commons/8/81/1984_%22Fetr_Feast%22_stamp_of_Iran.jpg'),  # c
-    (4, 22): ("Earth Day (Holiday) (Earth)", '248727', 'https://upload.wikimedia.org/wikipedia/commons/4/41/Earth_Day_Flag.jpg'),
-    (5, 5): ("Cinco de Mayo (Holiday)", 'D9E5DC', 'https://upload.wikimedia.org/wikipedia/commons/c/c0/Batalla_de_Puebla.png'),
-    (5, 14): ("Mother's Day (mother)", 'EC7063', 'https://upload.wikimedia.org/wikipedia/commons/1/1f/Northern_Pacific_Railway_Mother%27s_Day_postcard_1916.JPG'),  # c
-    (6, 14): ("Flag Day (United States)", '3498DB', 'https://upload.wikimedia.org/wikipedia/en/a/a4/Flag_of_the_United_States.svg'),
-    (6, 18): ("Father's Day (Holiday)", '2980B9', 'https://upload.wikimedia.org/wikipedia/commons/7/79/BritaAndI_Selfportrait.jpg'),
-    (7, 4): ("Fourth of July (Holiday)", 'E74C3C', 'https://upload.wikimedia.org/wikipedia/commons/6/68/Fourth_of_July_fireworks_behind_the_Washington_Monument%2C_1986.jpg'),
-    (7, 9): ("Eid al-Adha", 'E9E74C', 'https://upload.wikimedia.org/wikipedia/commons/d/de/The_Badshahi_in_all_its_glory_during_the_Eid_Prayers.JPG'),  # c
-    (9, 4): ("Labor Day (Holiday)", '154360', 'https://upload.wikimedia.org/wikipedia/commons/9/90/Labor_Day_parade_on_Pennsylvania_Avenue%2C_Washington%2C_D.C._LCCN2017645684.jpg'),  # c
-    (10, 4): ("Yom Kippur", 'FDFEFE', 'https://upload.wikimedia.org/wikipedia/commons/1/1e/Maurycy_Gottlieb_-_Jews_Praying_in_the_Synagogue_on_Yom_Kippur.jpg'),  # c
-    (10, 12): ("Columbus Day (Holiday)", '85C1E9', 'https://upload.wikimedia.org/wikipedia/commons/d/d5/Desembarco_de_Col%C3%B3n_de_Di%C3%B3scoro_Puebla.jpg'),
-    (10, 24): ("Diwali (Holiday)", 'BA0BAA', 'https://upload.wikimedia.org/wikipedia/commons/2/2f/Fireworks_Diwali_Chennai_India_November_2013_b.jpg'),  # c
-    (10, 30): ("Halloween", 'DC7633', 'https://upload.wikimedia.org/wikipedia/commons/a/a2/Jack-o%27-Lantern_2003-10-31.jpg'),
-    (11, 1): ("Day of the Dead (Holiday)", 'FF91ED', 'https://upload.wikimedia.org/wikipedia/commons/6/68/Catrina_3.jpg'),
-    (11, 11): ("Armistice Day", 'E74C3C', 'https://upload.wikimedia.org/wikipedia/commons/2/26/Veterans_Day_poster_2018.jpg'),
-    (11, 23): ("Thanksgiving (United States)", 'CA6F1E', 'https://upload.wikimedia.org/wikipedia/commons/9/98/Thanksgiving-Brownscombe.jpg'),  # c
-    (12, 3): ("Advent", '8E44AD', 'https://upload.wikimedia.org/wikipedia/commons/5/58/Adventwreath.jpg'),  # c
-    (12, 5): ("Saint Nicholas Day", 'FF0000', 'https://upload.wikimedia.org/wikipedia/commons/7/7d/Sinterklaas_2007.jpg'),
-    (12, 7): ("Hanukkah", '85C1E9', 'https://upload.wikimedia.org/wikipedia/commons/8/86/Hanukkah_%D7%97%D7%92_%D7%97%D7%A0%D7%95%D7%9B%D7%94.jpg'),
-    (12, 24): ("Christmas Eve (Holiday) (Eve)", '27AE60', 'https://upload.wikimedia.org/wikipedia/commons/6/62/Gifts_xmas.jpg'),
-    (12, 25): ("Christmas Day", '2ECC71', 'https://upload.wikimedia.org/wikipedia/commons/8/8f/NativityChristmasLights2.jpg'),
-    (12, 31): ("New Year's Eve", 'E74C3C', 'https://upload.wikimedia.org/wikipedia/commons/c/c9/MALAM_TAHUN_BARU_%285309956791%29.jpg'),
-    (7, 6): ("New Year's Eve", 'E74C3C', 'https://upload.wikimedia.org/wikipedia/commons/c/c9/MALAM_TAHUN_BARU_%285309956791%29.jpg'),
-}
-# fmt: on

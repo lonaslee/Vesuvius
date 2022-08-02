@@ -9,19 +9,19 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Optional, cast
 
 import discord
 from aiofiles import open as aopen
-from discord import ui
+from discord import app_commands, ui
 from discord.ext import commands
 
-from extensions import ANSIColors as C
-from extensions.definitions import NUM_EMOTES, owner_bypass
+from extensions import ansicolors as C
+from extensions.utils import NUM_EMOTES, owner_bypass
 from extensions.transformations import AllPoints, Point
 
 if TYPE_CHECKING:
     from vesuvius import Vesuvius
 
 
-class BaseSquare:
-    """Base class for a square on any board."""
+class Square:
+    """A square on any board."""
 
     def __init__(self) -> None:
         self.occupier: Literal['1', '2', '0'] | str = '0'
@@ -49,7 +49,7 @@ class BaseBoard:
         p2_emoji: str,
         empty_emoji: str,
         length: int,
-        square_type: type[BaseSquare] = BaseSquare,
+        square_type: type[Square] = Square,
     ) -> None:
         """Initialize a board."""
         ...
@@ -90,7 +90,7 @@ class BaseBoard:
 
         This method is game specific, override in subclasses.
         """
-        pass
+        ...
 
 
 class PromptMessage:
@@ -102,7 +102,7 @@ class PromptMessage:
     async def update(self, this_turn: Player) -> None:
         self.message = await self.message.edit(
             content=f'{this_turn.mention} '
-            f"{this_turn.symbol}'s turn! (send coordinates)"
+            f"{this_turn.color_name}'s turn! (send coordinates)"
         )
 
     async def winner(
@@ -122,7 +122,7 @@ class PromptMessage:
             )
         if time_is_out:
             timeout = f"{C.B}{C.YELLOW} Time's up - "
-        winner = f'Winner is {this_turn.symbol}, {this_turn}.'
+        winner = f'Winner is {this_turn.color_name}, {this_turn}.'
         if draw:
             winner = 'Draw!'
         self.message = await self.message.edit(content=f'{timeout}{winner}{ratio}')
@@ -183,7 +183,7 @@ class BoardMessage:
 
     async def update_message(
         self, new: str | tuple[str] | discord.Embed | list[discord.Embed]
-    ):
+    ) -> None:
         if isinstance(self.message, discord.Message):
             if isinstance(new, str):
                 self.message = await self.message.edit(content=new)
@@ -196,8 +196,8 @@ class BoardMessage:
                 return
             raise TypeError
 
-        self.message = cast(list[discord.Message], self.message)
-        for k, v in enumerate(cast(tuple[str], new)):
+        assert isinstance(self.message, list) and isinstance(new, tuple)
+        for k, v in enumerate(new):
             self.message[k] = await self.message[k].edit(content=v)
         return
 
@@ -209,7 +209,7 @@ class Player:
         self.member = m
         self.mention = m.mention
 
-        self.symbol: str = ''
+        self.color_name: str = ''
         self.number: Literal['1', '2'] = '1'
         self.color: str = ''
 
@@ -298,7 +298,6 @@ class BaseGame:
         If this method returns True, the game will exit.
         """
         ...
-        return False
 
     async def _iter_begin(self, this_turn: Player, next_turn: Player) -> bool:
         """Called at the start of every iteration.
@@ -348,14 +347,11 @@ class BaseGame:
         ...
 
     async def _flush_channel(self) -> None:
-        async for msg in self._prompt_msg.message.channel.history(limit=10):
-            if msg == self._prompt_msg.message:
-                return None
-            await msg.delete()
+        ...
 
     async def _get_coord(
         self, this_turn: Player, next_turn: Player
-    ) -> tuple[int, int] | tuple[str, None]:
+    ) -> tuple[int, int] | tuple[Literal['end', 'timeout'], None]:
         """Get a coordinate x, y from the current player.
 
         This users `self._input_regex` to validate the user message,
@@ -385,11 +381,13 @@ class TicTacToeBoard(BaseBoard):
         anylst.append(self._all_equal([self._all_squares[i] for i in (0, 4, 8)]))
         anylst.append(self._all_equal([self._all_squares[i] for i in (2, 4, 6)]))
         if any(anylst):
+            print('return 1')
             return '1'
+        print('return 0')
         return '0'
 
     @staticmethod
-    def _all_equal(ls: list[BaseSquare]) -> bool:
+    def _all_equal(ls: list[Square]) -> bool:
         return (
             ls[0].occupier != '0' and ls[0].occupier == ls[1].occupier == ls[2].occupier
         )
@@ -419,61 +417,53 @@ class TicTacToeGame(BaseGame):
 
 class ConnectFourBoard(BaseBoard):
     def __init__(self) -> None:
-        self.p1_emoji = '🟡'
-        self.p2_emoji = '🔴'
-        self.no_emoji = '⚫'
+        self.p1_emoji = '\U0001f7e1'  # 🟡
+        self.p2_emoji = '\U0001f534'  # 🔴
+        self.no_emoji = '\U000026ab'  # ⚫
         self.length = 7
-        self.square_type = BaseSquare
-        self._all_squares: list[BaseSquare] = [
+        self.square_type = Square
+        self._all_squares: list[Square] = [
             self.square_type() for _ in range(self.length * 6)
         ]
 
-        BoardRow = list[list[BaseSquare]]
-        self.rows: BoardRow = [self._all_squares[k - 7 : k] for k in range(7, 43, 7)]
-        self.columns: BoardRow = [[row[n] for row in self.rows] for n in range(7)]
-        self.right_diagonals: BoardRow = [[] for _ in range(6)]
-        self.left_diagonals: BoardRow = [[] for _ in range(6)]
-
-        r_diag_starts = ((0, 2), (0, 1), (0, 0), (1, 0), (2, 0), (3, 0))
-        l_diag_starts = ((0, 3), (0, 4), (0, 5), (1, 5), (2, 5), (3, 5))
-        for n in range(7):
-            for k, right_list in enumerate(self.right_diagonals):
-                try:
-                    right_list.append(
-                        self.columns[r_diag_starts[k][0] + n][r_diag_starts[k][1] + n]
-                    )
-                except IndexError:
-                    continue
-            for k, left_list in enumerate(self.left_diagonals):
-                try:
-                    left_list.append(
-                        self.columns[l_diag_starts[k][0] + n][l_diag_starts[k][1] - n]
-                    )
-                except IndexError:
-                    continue
+        BoardRow = list[list[Square]]
+        self._rows: BoardRow = [self._all_squares[k - 7 : k] for k in range(7, 43, 7)]
+        self._columns: BoardRow = [[row[n] for row in self._rows] for n in range(7)]
+        self.generate_diagonals(4)
 
     async def to_emojis(self) -> tuple[str, str]:
         string = str(self).splitlines(keepends=True)
-        return ''.join(string[0:4]).replace('1', '🟡').replace('2', '🔴').replace(
-            '0', '⚫'
-        ), ''.join(string[4:7]).replace('1', '🟡').replace('2', '🔴').replace('0', '⚫')
+        return ''.join(string[0:4]).replace('1', '\U0001f7e1').replace(
+            '2', '\U0001f534'
+        ).replace('0', '\U000026ab'), ''.join(string[4:7]).replace(
+            '1', '\U0001f7e1'
+        ).replace(
+            '2', '\U0001f534'
+        ).replace(
+            '0', '\U000026ab'
+        )
 
     async def is_valid_square(self, x: int, y: int, value: str) -> bool:
         # since there is gravity we don't have to worry about y
         if not [
-            square for square in self.columns[int(x) - 1] if square.occupier == '0'
+            square for square in self._columns[int(x) - 1] if square.occupier == '0'
         ]:
             return False
         return True
 
     async def set_square(self, x: int, y: int, value: Literal['1', '2']) -> None:
         this_column = [
-            square for square in self.columns[int(x) - 1] if square.occupier == '0'
+            square for square in self._columns[int(x) - 1] if square.occupier == '0'
         ]
         this_column[0].occupier = value
 
     async def check_win(self) -> Literal['0', '1']:
-        for lst in (self.rows, self.columns, self.right_diagonals, self.left_diagonals):
+        for lst in (
+            self._rows,
+            self._columns,
+            self._right_diagonals,
+            self._left_diagonals,
+        ):
             for some_row in [
                 ''.join(sl) for sl in [[p.occupier for p in l] for l in lst]
             ]:
@@ -507,8 +497,8 @@ class ConnectFourGame(BaseGame):
 
     async def _loop_begin(self) -> bool:
         await self._ctx.send(
-            f'{C.B}{self._player1.color}{self._player1.symbol}: {self._player1}, '
-            f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
+            f'{C.B}{self._player1.color}{self._player1.color_name}: {self._player1}, '
+            f'{self._player2.color}{self._player2.color_name}: {self._player2}{C.E}'
         )
         as_emojis = await self._board.to_emojis()
         assert isinstance(as_emojis, tuple)
@@ -524,14 +514,14 @@ class ConnectFourGame(BaseGame):
 
         self._prompt_msg = PromptMessage(
             await self._ctx.send(
-                f"{self._player1.mention} {self._player1.symbol}'s turn!"
+                f"{self._player1.mention} {self._player1.color_name}'s turn!"
             )
         )
         return False
 
     async def _get_coord(
         self, this_turn: Player, next_turn: Player
-    ) -> tuple[int, int] | tuple[str, None]:
+    ) -> tuple[int, int] | tuple[Literal['end', 'timeout'], None]:
         def chk(reaction: discord.Reaction, user: discord.User) -> bool:
             self._board_msg.message = cast(
                 list[discord.Message], self._board_msg.message
@@ -567,60 +557,16 @@ class ConnectFourGame(BaseGame):
 
 class ReversiBoard(BaseBoard):
     def __init__(self) -> None:
-        super().__init__('🌑', '⚪', '🟩', 8, BaseSquare)
+        super().__init__('\U0001f311', '\U000026aa', '\U0001f7e9', 8)  # 🌑, ⚪, 🟩
         self.rows = [
             [self._all_squares[self.length * y + x] for x in range(8)] for y in range(8)
         ]  # columns work with [x][y] access here too, instead of rows
-        self.columns = [[r[n] for r in self.rows] for n in range(8)]
-        self.columns[3][4].occupier = '2'
-        self.columns[4][3].occupier = '2'
-        self.columns[3][3].occupier = '1'
-        self.columns[4][4].occupier = '1'
-        r_diag_starts = (
-            (0, 5),
-            (0, 4),
-            (0, 3),
-            (0, 2),
-            (0, 1),
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 0),
-            (4, 0),
-            (5, 0),
-        )
-        l_diag_starts = (
-            (0, 2),
-            (0, 3),
-            (0, 4),
-            (0, 5),
-            (0, 6),
-            (0, 7),
-            (1, 7),
-            (2, 7),
-            (3, 7),
-            (4, 7),
-            (5, 7),
-        )
-        self.right_diagonals: list[list[BaseSquare]] = [[] for _ in range(11)]
-        self.left_diagonals: list[list[BaseSquare]] = [[] for _ in range(11)]
-        for n in range(8):
-            for k, right_list in enumerate(self.right_diagonals):
-                try:
-                    right_list.append(
-                        self.columns[r_diag_starts[k][0] + n][r_diag_starts[k][1] + n]
-                    )
-                except IndexError:
-                    continue
-            for k, left_list in enumerate(self.left_diagonals):
-                try:
-                    if l_diag_starts[0][1] - n < 0:
-                        continue
-                    left_list.append(
-                        self.columns[l_diag_starts[k][0] + n][l_diag_starts[k][1] - n]
-                    )
-                except IndexError:
-                    continue
+        self._columns = [[r[n] for r in self.rows] for n in range(8)]
+        self._columns[3][4].occupier = '2'
+        self._columns[4][3].occupier = '2'
+        self._columns[3][3].occupier = '1'
+        self._columns[4][4].occupier = '1'
+        self.generate_diagonals(3)
 
     async def to_emojis(self) -> tuple[str, str, str]:
         string_list = str(self).splitlines(keepends=True)
@@ -636,7 +582,7 @@ class ReversiBoard(BaseBoard):
         part1 = ''.join(string_list[0:3])
         part2 = ''.join(string_list[3:6])
         part3 = ''.join(string_list[6:])
-        return (part1, part2, part3 + '\n🟦 ' + ''.join(NUM_EMOTES[0:8]))
+        return (part1, part2, part3 + '\n\U0001f7e6 ' + ''.join(NUM_EMOTES[0:8]))  # 🟦
 
     async def is_valid_square(self, x: int, y: int, value: Literal['1', '2']) -> bool:
         square = self._all_squares[self.length * y - self.length + x - 1]
@@ -644,17 +590,17 @@ class ReversiBoard(BaseBoard):
             return False
         square.occupier = value
         rdiag, ldiag = [], []
-        for diag in self.right_diagonals:
+        for diag in self._right_diagonals:
             if square in diag:
                 rdiag = diag
-        for diag in self.left_diagonals:
+        for diag in self._left_diagonals:
             if square in diag:
                 ldiag = diag
 
-        has_square: list[list[BaseSquare]] = []
+        has_square: list[list[Square]] = []
         spans: list[tuple[int, int]] = []
-        if span := await self._find_across(self.columns[x - 1], value):
-            has_square.append(self.columns[x - 1])
+        if span := await self._find_across(self._columns[x - 1], value):
+            has_square.append(self._columns[x - 1])
             spans.append(span)
         if span := await self._find_across(self.rows[y - 1], value):
             has_square.append(self.rows[y - 1])
@@ -677,9 +623,7 @@ class ReversiBoard(BaseBoard):
         return None
 
     @staticmethod
-    async def _find_across(
-        lst: list[BaseSquare], char: str
-    ) -> tuple[int, int] | tuple[()]:
+    async def _find_across(lst: list[Square], char: str) -> tuple[int, int] | tuple[()]:
         string = ''.join([square.occupier for square in lst])
         try:
             if char == '1':
@@ -730,8 +674,8 @@ class ReversiGame(BaseGame):
         self._start_time = datetime.datetime.now()
         await self._ctx.send(
             f'{C.B}{C.BOLD_GREEN}Time limit: {C.CYAN}{self._time} minutes!\n'
-            f'{self._player1.color}{self._player1.symbol}: {self._player1}, '
-            f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
+            f'{self._player1.color}{self._player1.color_name}: {self._player1}, '
+            f'{self._player2.color}{self._player2.color_name}: {self._player2}{C.E}'
         )
         boart1, board2, board3 = cast(
             tuple[str, str, str], await self._board.to_emojis()
@@ -742,7 +686,7 @@ class ReversiGame(BaseGame):
         self._board_msg = BoardMessage([msg1, msg2, msg3], self._board)
         self._prompt_msg = PromptMessage(
             await self._ctx.send(
-                f"{self._player1.mention} {self._player1.symbol}'s turn!"
+                f"{self._player1.mention} {self._player1.color_name}'s turn!"
             )
         )
         return False
@@ -799,7 +743,7 @@ class ReversiGame(BaseGame):
         return True
 
 
-class WeiqiSquare(BaseSquare):
+class WeiqiSquare(Square):
     def __init__(self, x: int, y: int) -> None:
         super().__init__()
         self.x = x
@@ -870,9 +814,9 @@ class WeiqiSquare(BaseSquare):
 
 class WeiqiBoard(BaseBoard):
     def __init__(self) -> None:
-        self.p1_emoji = '🌑'
-        self.p2_emoji = '⚪'
-        self.no_emoji = '🟫'
+        self.p1_emoji = '\U0001f311'
+        self.p2_emoji = '\U000026aa'
+        self.no_emoji = '\U0001f7eb'
         self.length = 19
         self.square_type = WeiqiSquare
 
@@ -902,7 +846,7 @@ class WeiqiBoard(BaseBoard):
                     cl[n].right = self._columns[k + 1][n]
 
     def __str__(self) -> str:
-        raise TypeError
+        raise NotImplementedError
 
     async def to_emojis(self) -> list[discord.Embed]:
         NUMS = '⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚'
@@ -971,11 +915,11 @@ class WeiqiBoard(BaseBoard):
                 if surround == '1':
                     black_captured_groups += len(group)
                     for sq in group:
-                        sq.occupier = '⬛'
+                        sq.occupier = '\U00002b1b'  # ⬛
                 elif surround == '2':
                     white_captured_groups += len(group)
                     for sq in group:
-                        sq.occupier = '⬜'
+                        sq.occupier = '\U00002b1c'  #  ⬜
         print(black_captured_groups, white_captured_groups)
         return black_captured_groups, white_captured_groups
 
@@ -1024,8 +968,8 @@ class WeiqiGame(BaseGame):
         self._start_time = datetime.datetime.now()
         await self._ctx.send(
             f'{C.B}{C.BOLD_GREEN}Time limit: {C.CYAN}{self._time} minutes!\n'
-            f'{self._player1.color}{self._player1.symbol}: {self._player1}, '
-            f'{self._player2.color}{self._player2.symbol}: {self._player2}{C.E}'
+            f'{self._player1.color}{self._player1.color_name}: {self._player1}, '
+            f'{self._player2.color}{self._player2.color_name}: {self._player2}{C.E}'
         )
         self._board_msg = BoardMessage(
             await self._ctx.send(
@@ -1035,7 +979,7 @@ class WeiqiGame(BaseGame):
         )
         self._prompt_msg = PromptMessage(
             await self._ctx.send(
-                f"{self._player1.mention} {self._player1.symbol}'s turn!"
+                f"{self._player1.mention} {self._player1.color_name}'s turn!"
             )
         )
         return False
@@ -1092,7 +1036,7 @@ class WeiqiGame(BaseGame):
 
 class BattleshipBoard(BaseBoard):
     def __init__(self, player: Player) -> None:
-        super().__init__('⬜', '\U0001f7e9', '🟦', 10)
+        super().__init__('\U00002b1c', '\U0001f7e9', '\U0001f7e6', 10)
         self.player = player
         self.hit_ship = False
         self.sank_ship = False
@@ -1101,9 +1045,9 @@ class BattleshipBoard(BaseBoard):
             [self._all_squares[self.length * y + x] for x in range(10)]
             for y in range(10)
         ]
-        self.columns = [[r[n] for r in self.rows] for n in range(10)]
+        self._columns = [[r[n] for r in self.rows] for n in range(10)]
 
-        self.old_ships: list[BaseSquare] = []
+        self.old_ships: list[Square] = []
         self.ships = [
             AllPoints(coords)
             for coords in (
@@ -1114,6 +1058,10 @@ class BattleshipBoard(BaseBoard):
                 ((5, 5), (5, 6)),
             )
         ]
+
+    @property
+    def columns(self) -> list[list[Square]]:
+        return self._columns.copy()
 
     async def to_emojis(self) -> str:
         string = (
@@ -1128,13 +1076,13 @@ class BattleshipBoard(BaseBoard):
             if k % 11 == 0:
                 waves_string += reversed_nums[int(k / 10)] + ' '
             if char == self.no_emoji and not randint(0, 4):
-                waves_string += '🌊'
+                waves_string += '\U0001f30a'  # 🌊
                 continue
             waves_string += char
-        waves_string += '\n🟦 ' + ''.join(NUM_EMOTES)
+        waves_string += '\n\U0001f7e6 ' + ''.join(NUM_EMOTES)
         return waves_string
 
-    async def get_square(self, x: int | float, y: int | float) -> BaseSquare:
+    async def get_square(self, x: int | float, y: int | float) -> Square:
         """getter only for use with old_squares"""
         return self._all_squares[self.length * int(y) - self.length + int(x) - 1]
 
@@ -1150,20 +1098,20 @@ class BattleshipBoard(BaseBoard):
         self.hit_ship = False
         self.sank_ship = False
         set_square = self._all_squares[self.length * y - self.length + x - 1]
-        set_square.occupier = '📌'
+        set_square.occupier = '\U0001f4cc'  # 📌
         if set_square in self.old_ships:
-            set_square.occupier = '💥'
+            set_square.occupier = '\U0001f4a5'  # 💥
             self.hit_ship = True
         for k, ship in enumerate(self.ships):
-            this_squares: list[BaseSquare] = [
+            this_squares: list[Square] = [
                 self._all_squares[self.length * y - self.length + x - 1]
                 for x, y in [(int(point.x), int(point.y)) for point in ship.allpoints]
             ]
-            if all([square.occupier == '💥' for square in this_squares]):
+            if all([square.occupier == '\U0001f4a5' for square in this_squares]):
                 self.ships.pop(k)
                 self.sank_ship = True
                 for sq in this_squares:
-                    sq.occupier = '🔥'
+                    sq.occupier = '\U0001f525'  # 🔥
                 break
 
     async def check_win(self) -> tuple[int, int]:
@@ -1210,10 +1158,12 @@ class DirectionsButtonView(ui.View):
         ):
             self.add_item(DirectionButton(k, value))
 
+        self.children: list[DirectionButton]  # type: ignore
+
     async def wait(self) -> bool | NoReturn:
+        print('waiting', self.board.player.member)
         res = await super().wait()
         if res:
-            print('waiting', self.board.player.member)
             if self.board.player.member.id == self.superview.player1.member.id:
                 raise Timeout1
             raise Timeout2
@@ -1313,10 +1263,10 @@ class DirectionsButtonView(ui.View):
         print('this ship', this_ship)
         for square in self.board.old_ships:
             if square in this_ship:
-                self.children[2].disabled = True  # type: ignore
+                self.children[2].disabled = True
                 break
         else:
-            self.children[2].disabled = False  # type: ignore
+            self.children[2].disabled = False
 
         edges = [
             self.board.columns[0],
@@ -1335,10 +1285,10 @@ class DirectionsButtonView(ui.View):
             )
         for edge in edges:
             if all([point in edge for point in this_ship]):
-                self.children[0].disabled = True  # type: ignore
+                self.children[0].disabled = True
                 break
         else:
-            self.children[0].disabled = False  # type: ignore
+            self.children[0].disabled = False
 
         print('bziter')
         for k, edge in zip(
@@ -1352,9 +1302,9 @@ class DirectionsButtonView(ui.View):
         ):
             print('ziter', k, edge)
             if any([point in edge for point in this_ship]):
-                self.children[k].disabled = True  # type: ignore
+                self.children[k].disabled = True
             else:
-                self.children[k].disabled = False  # type: ignore
+                self.children[k].disabled = False
 
 
 class DirectionButton(ui.Button[DirectionsButtonView]):
@@ -1494,6 +1444,91 @@ class SingleBattleshipBoardAdapter(BaseBoard):
         ]
 
 
+class GomokuBoard(BaseBoard):
+    def __init__(self) -> None:
+        super().__init__('\U0001f311', '\U000026aa', '\U0001f7eb', 19)
+        self._rows = [self._all_squares[k - 19 : k] for k in range(19, 361, 19)]
+        self._columns = [[row[n] for row in self._rows] for n in range(19)]
+        self.generate_diagonals(5)
+
+    def __str__(self) -> str:
+        raise NotImplementedError
+
+    async def to_emojis(self) -> list[discord.Embed]:
+        NUMS = '⒈⒉⒊⒋⒌⒍⒎⒏⒐⒑⒒⒓⒔⒕⒖⒗⒘⒙⒚'
+        final_string = ''
+        for k, row in enumerate(self._rows):
+            as_string = ''.join([square.occupier for square in row])
+            final_string = ''.join([f'{NUMS[k]:>3} {as_string:>3}\n', final_string])
+        final_string = (
+            final_string.replace('1', self.p1_emoji)
+            .replace('2', self.p2_emoji)
+            .replace('0', self.no_emoji)
+        )
+        return [
+            discord.Embed(
+                description=f'```{final_string}'
+                f'{"     ⒈ ⒉ ⒊ ⒋⒌ ⒍⒎ ⒏ ⒐⒑ ⒒ ⒓ ⒔⒕ ⒖ ⒗ ⒘⒙ ⒚"}```'
+            )
+        ]
+
+    async def check_win(self) -> Literal['0', '1', '2']:
+        for lst in (
+            self._rows,
+            self._columns,
+            self._right_diagonals,
+            self._left_diagonals,
+        ):
+            for some_row in [
+                ''.join(occ_list) for occ_list in [[p.occupier for p in l] for l in lst]
+            ]:
+                if some_row.find('11111') != -1:
+                    return '1'
+                if some_row.find('22222') != -1:
+                    return '2'
+        return '0'
+
+
+class GomukuGame(BaseGame):
+    def __init__(
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        bot: commands.Bot,
+        opponent: discord.Member,
+    ) -> None:
+        super().__init__(
+            ctx,
+            bot,
+            opponent,
+            GomokuBoard,
+            'Black',
+            'White',
+            C.BOLD_GRAY_H_INDIGO,
+            C.BOLD_WHITE_H_INDIGO,
+            361,
+            r'(?P<x>1[0-9]|[1-9])[, ]*(?P<y>1[0-9]|[1-9])',
+            30,
+        )
+
+    async def _loop_begin(self) -> bool:
+        await self._ctx.send(
+            f'{C.B}{self._player1.color}{self._player1.color_name}: {self._player1}, '
+            f'{self._player2.color}{self._player2.color_name}: {self._player2}{C.E}'
+        )
+        self._board_msg = BoardMessage(
+            await self._ctx.send(
+                embeds=cast(list[discord.Embed], await self._board.to_emojis())
+            ),
+            self._board,
+        )
+        self._prompt_msg = PromptMessage(
+            await self._ctx.send(
+                f"{self._player1.mention} {self._player1.color_name}'s turn!"
+            )
+        )
+        return False
+
+
 class BattleshipGame(BaseGame):
     def __init__(
         self,
@@ -1511,7 +1546,7 @@ class BattleshipGame(BaseGame):
             C.RED,
             C.BLUE,
             200,
-            r'(?P<x>[1-9]0??)[, ]*(?P<y>[1-9]0??)',
+            r'(?P<x>10|[1-9])[, ]*(?P<y>10|[1-9])',
             45,
         )
 
@@ -1568,7 +1603,7 @@ class BattleshipGame(BaseGame):
             )
             self._prompt_msg = PromptMessage(
                 await self._ctx.send(
-                    f"{self._player1.mention} {self._player1.symbol}'s turn! (send coordinates)"
+                    f"{self._player1.mention} {self._player1.color_name}'s turn! (send coordinates)"
                 )
             )
             return False
@@ -1699,15 +1734,22 @@ class BattleshipGame(BaseGame):
 
 
 class InteractionContextAdapter:
+    """Adapts interaction objects to the context interface.
+
+    Context.from_interaction replies to the original message for every `.send` call,
+    this class uses `TextChannel.send` for the send adaptation.
+    """
+
     def __init__(self, interaction: discord.Interaction):
         self.interaction = interaction
         self.author = interaction.user
-        self.channel = cast(discord.TextChannel, interaction.channel)
+        self.channel = cast(discord.TextChannel | discord.Thread, interaction.channel)
         self.send = self.channel.send
 
-    async def reply(self, content: str, **kwargs: Any) -> discord.InteractionMessage:
+    async def reply(
+        self, content: str | None = None, **kwargs: Any
+    ) -> discord.InteractionMessage:
         await self.interaction.response.send_message(content, **kwargs)
-        self.interaction.message
         return await self.interaction.original_message()
 
 
@@ -1726,18 +1768,26 @@ class GameFeatures(commands.GroupCog, name='play'):
             self.ingame.clear()
             await ctx.send(f'{C.B}{C.GREEN}cleared!{C.E}')
 
-    @commands.hybrid_command(name='tic-tac-toe')
-    async def tictactoe(
-        self,
-        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
-        opponent: discord.Member,
+    @commands.hybrid_command(name='tic-tac-toe', with_app_command=False)
+    async def tictactoe_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
     ):
-        if isinstance(ctx_or_inter, discord.Interaction):
-            ctx = InteractionContextAdapter(ctx_or_inter)
-        else:
-            ctx = ctx_or_inter
+        await self._tictactoe(ctx, opponent)
 
-        if await self.wait_confirm(ctx, opponent, 'Tic-Tac-Toe'):
+    @app_commands.command(name='tic-tac-toe')
+    async def tictactoe_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play tic-tac-toe with another user."""
+        await self._tictactoe(InteractionContextAdapter(interaction), opponent)
+
+    async def _tictactoe(
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        opponent: discord.Member,
+        /,
+    ):
+        if not await self.wait_confirm(ctx, opponent, 'Tic-Tac-Toe'):
             return
 
         game = TicTacToeGame(ctx, self.bot, opponent)
@@ -1746,18 +1796,26 @@ class GameFeatures(commands.GroupCog, name='play'):
         assert game.winner and game.loser
         await self.done_playing('tictactoe', game.winner, game.loser, game.tie)
 
-    @commands.hybrid_command(name='connect-four')
-    async def connectfour(
+    @commands.hybrid_command(name='connect-four', with_app_command=False)
+    async def connectfour_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
+    ):
+        await self._connectfour(ctx, opponent)
+
+    @app_commands.command(name='connect-four')
+    async def connectfour_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play connect-four with another user."""
+
+        await self._connectfour(InteractionContextAdapter(interaction), opponent)
+
+    async def _connectfour(
         self,
-        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         opponent: discord.Member,
     ):
-        if isinstance(ctx_or_inter, discord.Interaction):
-            ctx = InteractionContextAdapter(ctx_or_inter)
-        else:
-            ctx = ctx_or_inter
-
-        if await self.wait_confirm(ctx, opponent, 'Connect-Four'):
+        if not await self.wait_confirm(ctx, opponent, 'Connect-Four'):
             return
 
         game = ConnectFourGame(ctx, self.bot, opponent)
@@ -1766,18 +1824,25 @@ class GameFeatures(commands.GroupCog, name='play'):
         assert game.winner and game.loser
         await self.done_playing('connectfour', game.winner, game.loser, game.tie)
 
-    @commands.hybrid_command(name='reversi')
-    async def reversi(
+    @commands.hybrid_command(name='reversi', with_app_command=False)
+    async def reversi_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
+    ):
+        await self._reversi(ctx, opponent)
+
+    @app_commands.command(name='reversi')
+    async def reversi_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play reversi with another user."""
+        await self._reversi(InteractionContextAdapter(interaction), opponent)
+
+    async def _reversi(
         self,
-        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         opponent: discord.Member,
     ):
-        if isinstance(ctx_or_inter, discord.Interaction):
-            ctx = InteractionContextAdapter(ctx_or_inter)
-        else:
-            ctx = ctx_or_inter
-
-        if await self.wait_confirm(ctx, opponent, 'Reversi'):
+        if not await self.wait_confirm(ctx, opponent, 'Reversi'):
             return
 
         game = ReversiGame(ctx, self.bot, opponent)
@@ -1786,18 +1851,25 @@ class GameFeatures(commands.GroupCog, name='play'):
         assert game.winner and game.loser
         await self.done_playing('reversi', game.winner, game.loser, game.tie)
 
-    @commands.hybrid_command(name='weiqi')
-    async def weiqi(
+    @commands.hybrid_command(name='weiqi', with_app_command=False)
+    async def weiqi_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
+    ):
+        await self._weiqi(ctx, opponent)
+
+    @app_commands.command(name='weiqi')
+    async def weiqi_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play go with another user."""
+        await self._weiqi(InteractionContextAdapter(interaction), opponent)
+
+    async def _weiqi(
         self,
-        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         opponent: discord.Member,
     ):
-        if isinstance(ctx_or_inter, discord.Interaction):
-            ctx = InteractionContextAdapter(ctx_or_inter)
-        else:
-            ctx = ctx_or_inter
-
-        if await self.wait_confirm(ctx, opponent, 'Weiqi'):
+        if not await self.wait_confirm(ctx, opponent, 'Weiqi'):
             return
 
         game = WeiqiGame(ctx, self.bot, opponent)
@@ -1806,18 +1878,52 @@ class GameFeatures(commands.GroupCog, name='play'):
         assert game.winner and game.loser
         await self.done_playing('weiqi', game.winner, game.loser, game.tie)
 
-    @commands.hybrid_command(name='battleship')
-    async def battleship(
+    @commands.hybrid_command(name='gomoku', with_app_command=False)
+    async def gomoku_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
+    ):
+        await self._gomoku(ctx, opponent)
+
+    @app_commands.command(name='gomoku')
+    async def gomoku_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play gomoku with another user."""
+        await self._gomoku(InteractionContextAdapter(interaction), opponent)
+
+    async def _gomoku(
         self,
-        ctx_or_inter: commands.Context[Vesuvius] | discord.Interaction,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         opponent: discord.Member,
     ):
-        if isinstance(ctx_or_inter, discord.Interaction):
-            ctx = InteractionContextAdapter(ctx_or_inter)
-        else:
-            ctx = ctx_or_inter
+        if not await self.wait_confirm(ctx, opponent, 'Gomoku'):
+            return
 
-        if await self.wait_confirm(ctx, opponent, 'Battleship'):
+        game = GomukuGame(ctx, self.bot, opponent)
+        await game.start()
+
+        assert game.winner and game.loser
+        await self.done_playing('connectfour', game.winner, game.loser, game.tie)
+
+    @commands.hybrid_command(name='battleship', with_app_command=False)
+    async def battleship_cmd(
+        self, ctx: commands.Context[Vesuvius], opponent: discord.Member
+    ):
+        await self._connectfour(ctx, opponent)
+
+    @app_commands.command(name='battleship')
+    async def battleship_inter(
+        self, interaction: discord.Interaction, opponent: discord.Member
+    ):
+        """Play battleship with another user."""
+        await self._connectfour(InteractionContextAdapter(interaction), opponent)
+
+    async def _battleship(
+        self,
+        ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
+        opponent: discord.Member,
+    ):
+        if not await self.wait_confirm(ctx, opponent, 'Battleship'):
             return
 
         game = BattleshipGame(ctx, self.bot, opponent)
@@ -1831,26 +1937,27 @@ class GameFeatures(commands.GroupCog, name='play'):
         ctx: commands.Context[Vesuvius] | InteractionContextAdapter,
         opp: discord.Member,
         game: str,
-    ) -> int:
+    ) -> bool:
         """wait for confirmation that the opp wants to play game"""
+        print(ctx)
         if ctx.author.id in self.ingame:
             await ctx.send(f'{C.B}{C.RED}you are already in another game.{C.E}')
-            return 1
+            return False
 
         if opp.id in self.ingame:
             await ctx.send(
                 f'{C.B}{C.RED}{opp.display_name} is already in another game. '
                 f'wait for it to finish or try another person!{C.E}'
             )
-            return 1
+            return False
 
         if opp.id == ctx.author.id:
             await ctx.send(f'{C.B}{C.RED}you cannot challenge yourself.{C.E}')
-            return 1
+            return False
 
         if opp.id == cast(discord.User, self.bot.user).id:
             await ctx.send(f'{C.B}{C.RED}no.{C.E}')
-            return 1
+            return False
 
         self.ingame.append(ctx.author.id)
         invitation = await ctx.reply(
@@ -1858,6 +1965,7 @@ class GameFeatures(commands.GroupCog, name='play'):
             f'to a match of {game}! {opp.mention}, do you accept? '
             '(react with :white_check_mark: or :negative_squared_cross_mark:)'
         )
+        print(invitation, type(invitation), invitation.add_reaction)
         await invitation.add_reaction('✅')
         await invitation.add_reaction('❎')
 
@@ -1892,20 +2000,15 @@ class GameFeatures(commands.GroupCog, name='play'):
                 )
                 self.ingame.append(opp.id)
                 status = 'accepted'
+
         now = datetime.datetime.now().strftime("%m/%d, %H:%M:%S")
-
-        if game == 'go':
-            game = 'weiqi'
-        elif game == 'othello':
-            game = 'reversi'
-
         async with aopen(self.bot.files['game_log'], 'a') as gl:
             await gl.write(
                 f'{now} | {ctx.author.display_name}{game:>16} {opp.display_name:>17},{status:>18}\n'
             )
         if status in {'ignored', 'rejected'}:
-            return 1
-        return 0
+            return False
+        return True
 
     async def done_playing(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import traceback
 from datetime import datetime
 from datetime import time as dt_time
@@ -13,9 +14,9 @@ from aiofiles import open as aopen
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from extensions import ANSIColors as C
+from extensions import ansicolors as C
 from extensions import wotd
-from extensions.definitions import holidays, tzi
+from extensions.utils import tzi
 
 if TYPE_CHECKING:
     from vesuvius import Vesuvius
@@ -95,33 +96,10 @@ class GeneralEvents(commands.Cog):
         print(f"ERROR {now} -", error)
 
 
-class EventLoggers(commands.Cog):
-    def __init__(self, bot: Vesuvius) -> None:
-        self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        ...
-
-    @commands.Cog.listener()
-    async def on_typing(
-        self,
-        channel: discord.abc.Messageable,
-        user: discord.User | discord.Member,
-        when: datetime,
-    ):
-        ...
-
-    @commands.Cog.listener()
-    async def on_guild_channel_pins_update(
-        self, channel: discord.TextChannel, last_pin: discord.Message
-    ):
-        ...
-
-
 class Tasks(commands.Cog):
     def __init__(self, bot: Vesuvius) -> None:
         self.bot = bot
+        self.holiday_json: dict[str, list[str]] = None  # type: ignore
 
         self.wotd_messages: list[discord.Message] = []
         self.holiday_messages: list[discord.Message] = []
@@ -173,22 +151,28 @@ class Tasks(commands.Cog):
     @day_start.before_loop
     async def before_day_start(self):
         await self.bot.wait_until_ready()
+        with open(self.bot.files['holidays']) as jf:
+            self.holiday_json = json.load(jf)
 
-    @staticmethod
-    async def holiday_today() -> tuple[discord.Embed, bytes] | None:
-        today = datetime.today()
-        for date in holidays:
-            if date[0] == today.month and date[1] == today.day:
-                title, summary, url, image = await wotd.get_wiki_page(holidays[date][0])
+    async def holiday_today(self) -> tuple[discord.Embed, bytes] | None:
+        today = datetime.today().strftime('%d%m')
+        assert self.holiday_json
+        for date in self.holiday_json:
+            if date == today:
+                title, summary, url, image = await wotd.get_wiki_page(
+                    self.holiday_json[date][0]
+                )
                 ebd = discord.Embed(
                     title=title,
                     description=f'{summary}\n{url}',
-                    colour=discord.Colour.from_str('#' + holidays[date][1]),
+                    colour=discord.Colour.from_str('#' + self.holiday_json[date][1]),
                 )
                 if image:
                     ebd.set_image(url=image)
-                async with aiohttp.request('GET', holidays[date][2]) as r:
+                event_image = None
+                async with aiohttp.request('GET', self.holiday_json[date][2]) as r:
                     event_image = await r.read()
+                assert event_image
                 return ebd, event_image
 
     # ==================================================================================

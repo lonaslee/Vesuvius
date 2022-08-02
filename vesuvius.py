@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Callable, Literal, TypeVar
+from functools import partial
+from typing import Callable, Literal, ParamSpec, TypeVar
 
 import aiosqlite
 import discord
 from discord.ext import commands
 
 import config
-from extensions.definitions import Database
+from extensions.utils import Database
 
 
 async def main():
@@ -25,22 +25,22 @@ async def main():
     )
     logger.addHandler(handler)
 
-    async with Vesuvius(logger) as bot:
+    async with Vesuvius(logger=logger) as bot:
         await bot.start(config.token)
 
 
 class Vesuvius(commands.Bot):
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, *, logger: logging.Logger) -> None:
         self.logger = logger
-        bot_intents = discord.Intents.all()
+        bot_intents = discord.Intents.default()
+        bot_intents.message_content = True
+        bot_intents.members = True
         super().__init__(
             command_prefix=commands.when_mentioned_or('`'),
             help_command=None,
             intents=bot_intents,
-            status=discord.Status.online,
-            activity=discord.Streaming(
-                name='among us', url='https://www.youtube.com/watch?v=dQw4w9WgXcQ'
-            ),
+            status=config.status,
+            activity=config.activity,
         )
 
         self.start_time = datetime.now()
@@ -50,12 +50,14 @@ class Vesuvius(commands.Bot):
         ] = 'all'
 
         self.database: Database = None  # type: ignore
-        self._tpexecutor: ThreadPoolExecutor = ThreadPoolExecutor(1)
 
-    R = TypeVar('R')
+    _P = ParamSpec('_P')
+    _R = TypeVar('_R')
 
-    async def run_in_tpexec(self, func: Callable[..., R], *args: Any) -> R:
-        return await self.loop.run_in_executor(self._tpexecutor, func, *args)
+    async def run_in_tpexec(
+        self, func: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs
+    ) -> _R:
+        return await self.loop.run_in_executor(None, partial(func, *args, **kwargs))
 
     async def setup_hook(self) -> None:
         await super().setup_hook()
@@ -79,6 +81,9 @@ class Vesuvius(commands.Bot):
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         print(f'ADDED to guild {guild.name}')
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        print(f'REMOVED from guild {guild.name}')
 
 
 if __name__ == '__main__':

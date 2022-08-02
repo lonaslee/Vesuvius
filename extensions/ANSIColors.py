@@ -3,6 +3,7 @@ END = '```'
 B = '```ansi\n'
 E = '```'
 NOCLR = '\u001b[0m'
+NCLR = '\u001b[0m'
 
 BOLD = "\u001b[0m\u001b[0;1;m"
 UNDERLINE = "\u001b[0m\u001b[0;4;m"

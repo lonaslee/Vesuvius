@@ -12,7 +12,7 @@ import discord
 from discord.ext import commands
 from matplotlib import pyplot as plt
 
-from extensions import ANSIColors as C
+from extensions import ansicolors as C
 from extensions import transformations, trianglecenters
 
 if TYPE_CHECKING:

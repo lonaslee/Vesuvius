@@ -11,8 +11,8 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image
 
-from extensions import ANSIColors as C
-from extensions.definitions import owner_bypass
+from extensions import ansicolors as C
+from extensions.utils import owner_bypass
 
 if TYPE_CHECKING:
     from vesuvius import Vesuvius
