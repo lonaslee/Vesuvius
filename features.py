@@ -165,20 +165,19 @@ class GraphFeatures(commands.Cog):
     @commands.cooldown(rate=1, per=60, type=commands.BucketType.user)
     async def transformations(self, ctx: commands.Context[Vesuvius], *, text: str = ''):
         """compute translations, reflections, rotations, and dilations on a set of points. usage: `transformations [x, y, ...]"""
-        point_list: list[tuple[float, float]]
+        point_list: list[tuple[float, float]] = []
         if text:
             match_list: list[str] = re.findall(r'(-?\d+.?\d*?[\s,]*?)', text)
             match_list = [pt.strip(' ,(), ') for pt in match_list]
-            num_list = [float(p) for p in match_list]
+            num_list = list(map(float, match_list))
 
-            if len(point_list) % 2 != 0:
+            if len(num_list) % 2 != 0:
                 await ctx.send(f'{C.B}{C.RED}Each point must have x and y.{C.E}')
                 return
 
             point_list = [
                 (num_list[d], num_list[d + 1]) for d in range(0, len(num_list), 2)
             ]
-
         else:
             for n in range(100):
                 tup = await self.get_point(ctx, f'{n+1} (send "end" to stop)')

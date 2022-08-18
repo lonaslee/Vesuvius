@@ -52,10 +52,73 @@ class BaseBoard:
         square_type: type[Square] = Square,
     ) -> None:
         """Initialize a board."""
-        ...
+        self.p1_emoji = p1_emoji
+        self.p2_emoji = p2_emoji
+        self.no_emoji = empty_emoji
+        self.length = length
+        self.square_type = square_type
+        self._all_squares: list[Square] = [
+            self.square_type() for _ in range(self.length * self.length)
+        ]
+
+    def generate_diagonals(self, min_length: int) -> None:
+        """Store all diagonals in instance attributes.
+
+        This method sets `self._right_diagonals` and `self._left_diagonals` to lists
+        of diagonal rows, rows being lists of squares in `self._all_squares`.
+        This method relies on `self.length` to get the corrrect squares, make sure that is correct.
+        """
+        one_side = self.length - min_length + 1
+        r_diag_starts = [(int(), y) for y in range(one_side)]
+        r_diag_starts.extend([(x, 0) for x in range(1, one_side)])
+        l_diag_starts = [(int(), y) for y in range(min_length - 1, self.length)]
+        l_diag_starts.extend([(x, self.length - 1) for x in range(1, one_side)])
+        self._right_diagonals: list[list[Square]] = [
+            [] for _ in range(len(r_diag_starts))
+        ]
+        self._left_diagonals: list[list[Square]] = [
+            [] for _ in range(len(r_diag_starts))
+        ]
+        for n in range(self.length):
+            for k, right_list in enumerate(self._right_diagonals):
+                try:
+                    right_list.append(
+                        self._all_squares[
+                            self.length * (r_diag_starts[k][1] + n)
+                            - self.length
+                            + (r_diag_starts[k][0] + n)
+                            - 1
+                        ]
+                    )
+                except IndexError:
+                    continue
+            for k, left_list in enumerate(self._left_diagonals):
+                if l_diag_starts[0][1] - n < 0:
+                    continue
+                try:
+                    left_list.append(
+                        self._all_squares[
+                            self.length * (l_diag_starts[k][1] + n)
+                            - self.length
+                            + (l_diag_starts[k][0] + n)
+                            - 1
+                        ]
+                    )
+                except IndexError:
+                    continue
 
     def __str__(self) -> str:
-        ...
+        return '\n'.join(
+            reversed(
+                [
+                    ''.join([square.occupier for square in square_slice])
+                    for square_slice in [
+                        self._all_squares[i : i + self.length]
+                        for i in range(0, self.length * self.length, self.length)
+                    ]
+                ]
+            )
+        )
 
     async def to_emojis(
         self,
@@ -64,7 +127,12 @@ class BaseBoard:
 
         This returns a string version of the board ready to be sent directly to discord.
         """
-        ...
+        return (
+            str(self)
+            .replace('1', self.p1_emoji)
+            .replace('2', self.p2_emoji)
+            .replace('0', self.no_emoji)
+        )
 
     async def is_valid_square(self, x: int, y: int, value: Literal['1', '2']) -> bool:
         """Check if a player can place a piece in x, y.
@@ -75,7 +143,9 @@ class BaseBoard:
         By default this decides based on whether the spot is empty, but
         it can be overriden for special games.
         """
-        ...
+        if self._all_squares[self.length * y - self.length + x - 1].occupier == '0':
+            return True
+        return False
 
     async def set_square(self, x: int, y: int, value: Literal['1', '2']) -> None:
         """Set a square to a new value.
@@ -83,14 +153,14 @@ class BaseBoard:
         This assumes that setting the square does not break any game rules,
         and that x and y are within the board range.
         """
-        ...
+        self._all_squares[self.length * y - self.length + x - 1].occupier = value
 
     async def check_win(self) -> Literal['0', '1', '2'] | None | tuple[int, int]:
         """Check for a winner on the board.
 
         This method is game specific, override in subclasses.
         """
-        ...
+        pass
 
 
 class PromptMessage:
@@ -258,7 +328,32 @@ class BaseGame:
         input_wait_time: int,
     ) -> None:
         """Initalize the game."""
-        ...
+        self.winner: Optional[discord.Member] = None
+        self.loser: Optional[discord.Member] = None
+        self.tie: bool = False
+
+        self._ctx = ctx
+        self._bot = bot
+        self._board: BaseBoard = board_type()  # type: ignore
+        self._board_msg: BoardMessage = None  # type: ignore
+        self._prompt_msg: PromptMessage = None  # type: ignore
+
+        self._numof_loops = numof_loops
+        self._input_regex = input_regex
+        self._wait_time = input_wait_time
+        self._input_occupied_error = 'occupied'
+        self._input_format_error = 'fmt_error'
+        self._flush = False
+
+        self._player1 = Player(cast(discord.Member, ctx.author))
+        self._player2 = Player(opponent)
+
+        if randint(0, 1):
+            self._player1, self._player2 = self._player2, self._player1
+
+        self._player1.number, self._player2.number = '1', '2'
+        self._player1.color_name, self._player2.color_name = symbol1, symbol2
+        self._player1.color, self._player2.color = color1, color2
 
     async def start(self) -> None:
         """Start the game.
@@ -286,7 +381,29 @@ class BaseGame:
 
         _loop_end
         """
-        ...
+        if await self._loop_begin():
+            return None
+        this_turn, next_turn = self._player2, self._player1
+        for _ in range(self._numof_loops):
+            this_turn, next_turn = next_turn, this_turn
+
+            if await self._iter_begin(this_turn, next_turn):
+                return None
+
+            x, y = await self._get_coord(this_turn, next_turn)
+            if x == 'timeout':
+                await self._timeout(this_turn, next_turn)
+                return None
+            if x == 'end':
+                await self._end(this_turn, next_turn)
+                return None
+
+            assert isinstance(x, int) and isinstance(y, int)
+            await self._board.set_square(x, y, this_turn.number)
+            if await self._iter_end(this_turn, next_turn):
+                return None
+        await self._loop_end(this_turn, next_turn)
+        return None
 
     async def _loop_begin(self) -> bool:
         """Called before the input loop starts.
@@ -297,7 +414,21 @@ class BaseGame:
 
         If this method returns True, the game will exit.
         """
-        ...
+        await self._ctx.send(
+            f'{C.B}{self._player1.color}{self._player1.color_name}: {self._player1}, '
+            f'{self._player2.color}{self._player2.color_name}: {self._player2}{C.E}'
+        )
+
+        as_emojis = await self._board.to_emojis()
+        assert isinstance(as_emojis, str)
+        self._board_msg = BoardMessage(await self._ctx.send(as_emojis), self._board)
+
+        self._prompt_msg = PromptMessage(
+            await self._ctx.send(
+                f"{self._player1.mention} {self._player1.color_name}'s turn!"
+            )
+        )
+        return False
 
     async def _iter_begin(self, this_turn: Player, next_turn: Player) -> bool:
         """Called at the start of every iteration.
@@ -306,7 +437,9 @@ class BaseGame:
 
         If this method returns True, the game will exit.
         """
-        ...
+        print('iter begin')
+        await self._prompt_msg.update(this_turn)
+        return False
 
     async def _iter_end(self, this_turn: Player, next_turn: Player) -> bool:
         """Called at the end of every iteration of the input loop, after a
@@ -318,15 +451,24 @@ class BaseGame:
 
         If the method returns True, the game will exit.
         """
-        ...
+        print('iter end')
+        if self._flush:
+            self._flush = False
+            await self._flush_channel()
+
+        await self._board_msg.update()
+        if await self._check_board_win(this_turn, next_turn):
+            return True
+        return False
 
     async def _timeout(self, this_turn: Player, next_turn: Player) -> None:
         """Called when this turn's player times out."""
-        ...
+        self.winner = next_turn.member
+        self.loser = this_turn.member
 
     async def _end(self, this_turn: Player, next_turn: Player) -> None:
         """Called when an end request is accepted."""
-        ...
+        await self._check_board_win(this_turn, next_turn, force=True)
 
     async def _loop_end(self, this_turn: Player, next_turn: Player) -> None:
         """Called when the input loop exits.
@@ -334,7 +476,9 @@ class BaseGame:
         By default this sets the attribute `tie` to True,
         override this for different behavior.
         """
-        ...
+        self.winner = this_turn.member
+        self.loser = next_turn.member
+        self.tie = True
 
     async def _check_board_win(
         self, this_turn: Player, next_turn: Player, *, force: bool = False
@@ -344,10 +488,26 @@ class BaseGame:
         By default this sets the attribute `winner` to the player of the current turn,
         override this for different behavior.
         """
-        ...
+        print('check bd win')
+        if (a := await self._board.check_win()) != '0' or force:
+            print(a)
+            await self._prompt_msg.winner(this_turn)
+            self.winner = this_turn.member
+            self.loser = next_turn.member
+            return True
+        if force:
+            await self._prompt_msg.draw()
+            self.winner = this_turn.member
+            self.loser = next_turn.member
+            self.tie = True
+            return True
+        return False
 
     async def _flush_channel(self) -> None:
-        ...
+        async for msg in self._prompt_msg.message.channel.history(limit=10):
+            if msg == self._prompt_msg.message:
+                return None
+            await msg.delete()
 
     async def _get_coord(
         self, this_turn: Player, next_turn: Player
@@ -363,7 +523,69 @@ class BaseGame:
         * On timeout, return tuple[Literal['timeout'], None]
         * On end request, return tuple[Literal['end'], None]
         """
-        ...
+        timeout = end = flush = False
+
+        def check(m: discord.Message):
+            if m.content == 'fflush' and m.author in {
+                this_turn.member,
+                next_turn.member,
+            }:
+                self._flush = True
+                return False
+            if m.content.startswith('//'):
+                return False
+            if end:
+                return m.author == next_turn.member and m.channel == self._ctx.channel
+            return m.author == this_turn.member and m.channel == self._ctx.channel
+
+        while True:
+            if flush:
+                async for msg in self._prompt_msg.message.channel.history(limit=10):
+                    if msg == self._prompt_msg.message:
+                        break
+                    await msg.delete()
+
+            message = None
+            try:
+                message = await self._bot.wait_for(
+                    'message', check=check, timeout=self._wait_time
+                )
+                await message.delete()
+                timeout = False
+                x, y = re.search(self._input_regex, message.content).groups()  # type: ignore
+                x, y = int(x), int(y)
+
+                if not await self._board.is_valid_square(x, y, this_turn.number):
+                    await getattr(self._prompt_msg, self._input_occupied_error)(
+                        this_turn
+                    )
+                    continue
+
+                return x, y
+            except asyncio.TimeoutError:
+                if timeout:
+                    await self._prompt_msg.timeout(this_turn, next_turn)
+                    return 'timeout', None
+                timeout = True
+                await self._prompt_msg.hurry(this_turn)
+                continue
+            except AttributeError:
+                assert message
+                if end:
+                    if message.content.lower() in {'yes', 'ye', 'ok', 'k'}:
+                        return 'end', None
+                    else:
+                        await self._prompt_msg.continue_game(this_turn)
+                        end = False
+                        continue
+
+                if 'end' in message.content.lower():
+                    end = True
+                    await self._prompt_msg.end_request(this_turn, next_turn)
+                    continue
+
+                await getattr(self._prompt_msg, self._input_format_error)(this_turn)
+                continue
 
 
 # subclasses ===========================================================================
@@ -1611,10 +1833,10 @@ class BattleshipGame(BaseGame):
         task.cancel()
         await self.cancel_buttons_view(view1)
         await self.cancel_buttons_view(view2)
-        await cancel_info[0].edit_original_message(
+        await cancel_info[0].edit_original_response(
             content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=cancel_info[1]
         )
-        await cancel_info[2].edit_original_message(
+        await cancel_info[2].edit_original_response(
             content=f'{C.B}{C.RED}You timed out.{C.E}', view=cancel_info[3]
         )
         start_message = await start_message.edit(
@@ -1717,7 +1939,7 @@ class BattleshipGame(BaseGame):
             assert view2 and start_view.interaction2
             await self.cancel_buttons_view(view2)
             start_view.interaction2.message = (
-                await start_view.interaction2.edit_original_message(
+                await start_view.interaction2.edit_original_response(
                     content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=view2
                 )
             )
@@ -1726,7 +1948,7 @@ class BattleshipGame(BaseGame):
             assert view1 and start_view.interaction1
             await self.cancel_buttons_view(view1)
             start_view.interaction1.message = (
-                await start_view.interaction1.edit_original_message(
+                await start_view.interaction1.edit_original_response(
                     content=f'{C.B}{C.RED}Your opponent timed out.{C.E}', view=view1
                 )
             )
@@ -1750,7 +1972,7 @@ class InteractionContextAdapter:
         self, content: str | None = None, **kwargs: Any
     ) -> discord.InteractionMessage:
         await self.interaction.response.send_message(content, **kwargs)
-        return await self.interaction.original_message()
+        return await self.interaction.original_response()
 
 
 class GameFeatures(commands.GroupCog, name='play'):

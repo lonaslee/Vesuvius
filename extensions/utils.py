@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import datetime
 from itertools import zip_longest
-from typing import Any, Callable, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Sequence, cast
 
 import aiosqlite
 import config
 import discord
+from discord.ext import commands
+
+if TYPE_CHECKING:
+    from vesuvius import Vesuvius
 
 __all__ = (
     'NUM_EMOTES',
@@ -66,17 +70,11 @@ def owner_bypass(time: int):
     """return a function that returns a Cooldown of time length, except for the owner"""
 
     def cooldown_func(
-        message: discord.Message | discord.Interaction,
+        ctx: commands.Context[Vesuvius],
     ) -> discord.app_commands.Cooldown | None:
-        if (
-            isinstance(message, discord.Message)
-            and message.author.id == config.owner_id
-        ):
+        if ctx.interaction and ctx.interaction.user.id == config.owner_id:
             return None
-        if (
-            isinstance(message, discord.Interaction)
-            and message.user.id == config.owner_id
-        ):
+        if ctx.message and ctx.author.id == config.owner_id:
             return None
         return discord.app_commands.Cooldown(1, time)
 

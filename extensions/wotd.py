@@ -69,7 +69,7 @@ async def oneworder(path: str | Path):
     return wd
 
 
-async def get_wiki_page(title: str) -> tuple[str, str, str, str] | None:
+async def get_wiki_page(title: str) -> tuple[str, str, str, str]:
     try:
         page: wikipedia.WikipediaPage = wikipedia.page(title)
         summary: str = page.summary
@@ -77,4 +77,4 @@ async def get_wiki_page(title: str) -> tuple[str, str, str, str] | None:
             summary = page.summary[:4000]
         return page.title, summary.removesuffix('\n'), page.url, choice(page.images)
     except Exception:
-        return None
+        return '', '', '', ''
